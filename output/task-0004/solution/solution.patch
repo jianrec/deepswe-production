@@ -1,0 +1,695 @@
+diff --git a/packages/react/src/ReactChildren.js b/packages/react/src/ReactChildren.js
+index 99ad9a7..c1c5e3f 100644
+--- a/packages/react/src/ReactChildren.js
++++ b/packages/react/src/ReactChildren.js
+@@ -22,76 +22,32 @@ import {
+   REACT_ELEMENT_TYPE,
+   REACT_LAZY_TYPE,
+   REACT_PORTAL_TYPE,
+-  REACT_OPTIMISTIC_KEY,
+ } from 'shared/ReactSymbols';
+-import {enableOptimisticKey} from 'shared/ReactFeatureFlags';
+ import {checkKeyStringCoercion} from 'shared/CheckStringCoercion';
++import {
++  SEPARATOR,
++  SUBSEPARATOR,
++  getElementKey,
++  escapeUserProvidedKey,
++} from 'shared/ReactChildKeyPath';
+ 
+-import {isValidElement, cloneAndReplaceKey} from './jsx/ReactJSXElement';
+-
+-const SEPARATOR = '.';
+-const SUBSEPARATOR = ':';
+-
+-/**
+- * Escape and wrap key so it is safe to use as a reactid
+- *
+- * @param {string} key to be escaped.
+- * @return {string} the escaped key.
+- */
+-function escape(key: string): string {
+-  const escapeRegex = /[=:]/g;
+-  const escaperLookup = {
+-    '=': '=0',
+-    ':': '=2',
+-  };
+-  const escapedString = key.replace(escapeRegex, function (match) {
+-    // $FlowFixMe[invalid-computed-prop]
+-    return escaperLookup[match];
+-  });
+-
+-  return '$' + escapedString;
+-}
++import {
++  isValidElement,
++  cloneAndReplaceKey,
++  cloneAndReplaceKeyForChild,
++} from './jsx/ReactJSXElement';
+ 
+ /**
+  * TODO: Test that a single child and an array with one item have the same key
+  * pattern.
+  */
+ 
++// Shared between `mapIntoArray` (which backs map/forEach/count/toArray) and the
++// dedicated single-pass traversal used by reduce/filter/find/toKeyedArray. Both
++// mutate this so that the "Using Maps as children" warning is only emitted once
++// per process, regardless of which utility first encounters a Map.
+ let didWarnAboutMaps = false;
+ 
+-const userProvidedKeyEscapeRegex = /\/+/g;
+-function escapeUserProvidedKey(text: string): string {
+-  return text.replace(userProvidedKeyEscapeRegex, '$&/');
+-}
+-
+-/**
+- * Generate a key string that identifies a element within a set.
+- *
+- * @param {*} element A element that could contain a manual key.
+- * @param {number} index Index that is used if a manual key is not provided.
+- * @return {string}
+- */
+-function getElementKey(element: any, index: number): string {
+-  // Do some typechecking here since we call this blindly. We want to ensure
+-  // that we don't block potential future ES APIs.
+-  if (typeof element === 'object' && element !== null && element.key != null) {
+-    if (enableOptimisticKey && element.key === REACT_OPTIMISTIC_KEY) {
+-      // For React.Children purposes this is treated as just null.
+-      if (__DEV__) {
+-        console.error("React.Children helpers don't support optimisticKey.");
+-      }
+-      return index.toString(36);
+-    }
+-    // Explicit key
+-    if (__DEV__) {
+-      checkKeyStringCoercion(element.key);
+-    }
+-    return escape('' + element.key);
+-  }
+-  // Implicit key determined by the index in the set
+-  return index.toString(36);
+-}
+-
+ function resolveThenable<T>(thenable: Thenable<T>): T {
+   switch (thenable.status) {
+     case 'fulfilled': {
+@@ -462,10 +418,358 @@ function onlyChild<T>(children: T): T {
+   return children;
+ }
+ 
++type ReduceFunc<T> = (accumulator: T, child: ?React$Node, index: number) => T;
++type PredicateFunc = (child: ?React$Node, index: number) => mixed;
++
++// The callback invoked for every leaf child by `traverseAllChildren`. It
++// receives the caller-provided `context`, the (original, un-rekeyed) child, the
++// fully-qualified traversal key React assigns to that child, and the running
++// flattened index shared with `forEach`. Returning `false` aborts the
++// single-pass traversal early (used by `find`).
++type TraverseFunc = (
++  context: mixed,
++  child: ?React$Node,
++  childKey: string,
++  index: number,
++) => boolean | void;
++
++// Per-traversal bookkeeping for the functional `React.Children` utilities.
++// `index` is the running flattened index (identical to the sequence `forEach`
++// observes) and `stopped` allows `find` to abort mid-flight without unwinding
++// the whole nested traversal through exceptions.
++type TraversalState = {
++  index: number,
++  stopped: boolean,
++};
++
++/**
++ * Single-pass child traversal shared by the functional `React.Children`
++ * utilities. This mirrors the flattening and key-generation rules performed by
++ * `mapIntoArray` bit-for-bit: `null`/`undefined`/booleans are skipped, strings
++ * and numbers are leaves, nested arrays and iterables are flattened, lazy
++ * nodes are resolved, thenables are awaited, and plain objects throw the same
++ * invalid-child error. Because the callback never returns a value to collect,
++ * the `escapedPrefix` accumulation that `mapIntoArray` performs for mapped
++ * arrays is unnecessary: the `childKey` handed to the callback is already the
++ * fully-qualified traversal key that `toArray` would assign to that position.
++ */
++function traverseAllChildrenImpl(
++  children: ?ReactNodeList,
++  nameSoFar: string,
++  callback: TraverseFunc,
++  context: mixed,
++  traversalState: TraversalState,
++): number {
++  if (traversalState.stopped) {
++    // A previous callback requested early termination (see `findChild`). Bail
++    // out of any remaining nested arrays/iterables immediately.
++    return 0;
++  }
++
++  const type = typeof children;
++
++  if (type === 'undefined' || type === 'boolean') {
++    // All of the above are perceived as null.
++    children = null;
++  }
++
++  if (children === null) {
++    return 0;
++  }
++
++  let invokeCallback = false;
++
++  if (children !== null) {
++    switch (type) {
++      case 'bigint':
++      case 'string':
++      case 'number':
++        invokeCallback = true;
++        break;
++      case 'function':
++        // Preserve the existing React.Children behavior for function children.
++        break;
++      case 'object':
++        switch ((children: any).$$typeof) {
++          case REACT_ELEMENT_TYPE:
++          case REACT_PORTAL_TYPE:
++            invokeCallback = true;
++            break;
++          case REACT_LAZY_TYPE:
++            const payload = (children: any)._payload;
++            const init = (children: any)._init;
++            return traverseAllChildrenImpl(
++              init(payload),
++              nameSoFar,
++              callback,
++              context,
++              traversalState,
++            );
++        }
++    }
++  }
++
++  if (invokeCallback) {
++    const child = children;
++    // If it's the only child, treat the name as if it was wrapped in an array
++    // so that it's consistent if the number of children grows. This exactly
++    // mirrors the single-child key handling in `mapIntoArray`.
++    const childKey =
++      nameSoFar === '' ? SEPARATOR + getElementKey(child, 0) : nameSoFar;
++    const shouldContinue = callback(
++      context,
++      child,
++      childKey,
++      traversalState.index++,
++    );
++    if (shouldContinue === false) {
++      traversalState.stopped = true;
++    }
++    return 1;
++  }
++
++  let child;
++  let nextName;
++  let subtreeCount = 0; // Count of children found in the current subtree.
++  const nextNamePrefix =
++    nameSoFar === '' ? SEPARATOR : nameSoFar + SUBSEPARATOR;
++
++  if (isArray(children)) {
++    for (let i = 0; i < children.length; i++) {
++      if (traversalState.stopped) {
++        // Propagate early termination out of the surrounding nested traversal.
++        break;
++      }
++      child = children[i];
++      nextName = nextNamePrefix + getElementKey(child, i);
++      subtreeCount += traverseAllChildrenImpl(
++        child,
++        nextName,
++        callback,
++        context,
++        traversalState,
++      );
++    }
++  } else {
++    const iteratorFn = getIteratorFn(children);
++    if (typeof iteratorFn === 'function') {
++      const iterableChildren: Iterable<React$Node> & {
++        entries: any,
++      } = (children: any);
++
++      if (__DEV__) {
++        // Warn about using Maps as children
++        if (iteratorFn === iterableChildren.entries) {
++          if (!didWarnAboutMaps) {
++            console.warn(
++              'Using Maps as children is not supported. ' +
++                'Use an array of keyed ReactElements instead.',
++            );
++          }
++          didWarnAboutMaps = true;
++        }
++      }
++
++      const iterator = iteratorFn.call(iterableChildren);
++      let ii = 0;
++      // $FlowFixMe[incompatible-use] `iteratorFn` might return null according to typing.
++      while (!traversalState.stopped) {
++        const step = iterator.next();
++        if (step.done) {
++          break;
++        }
++        child = step.value;
++        nextName = nextNamePrefix + getElementKey(child, ii++);
++        subtreeCount += traverseAllChildrenImpl(
++          child,
++          nextName,
++          callback,
++          context,
++          traversalState,
++        );
++      }
++      if (
++        traversalState.stopped &&
++        iterator != null &&
++        typeof iterator.return === 'function'
++      ) {
++        iterator.return();
++      }
++    } else if (type === 'object') {
++      if (typeof (children: any).then === 'function') {
++        return traverseAllChildrenImpl(
++          resolveThenable((children: any)),
++          nameSoFar,
++          callback,
++          context,
++          traversalState,
++        );
++      }
++
++      // eslint-disable-next-line react-internal/safe-string-coercion
++      const childrenString = String((children: any));
++
++      throw new Error(
++        `Objects are not valid as a React child (found: ${
++          childrenString === '[object Object]'
++            ? 'object with keys {' +
++              Object.keys((children: any)).join(', ') +
++              '}'
++            : childrenString
++        }). ` +
++          'If you meant to render a collection of children, use an array ' +
++          'instead.',
++      );
++    }
++  }
++
++  return subtreeCount;
++}
++
++/**
++ * Drive the shared single-pass traversal for a children container, invoking
++ * `callback` for every flattened leaf child. Returns nothing; callers collect
++ * results through closures over their own accumulators.
++ */
++function traverseAllChildren(
++  children: ?ReactNodeList,
++  callback: TraverseFunc,
++  context: mixed,
++): void {
++  if (children == null) {
++    // Nothing to visit; matches the `children == null` short-circuit in
++    // `mapChildren`.
++    return;
++  }
++  const traversalState: TraversalState = {index: 0, stopped: false};
++  traverseAllChildrenImpl(children, '', callback, context, traversalState);
++}
++
++/**
++ * Fold over the flattened children in traversal order.
++ *
++ * The reducer is invoked as reducer(accumulator, child, index) for every leaf
++ * child, using the same flattened index sequence that `forEach` uses. Returns
++ * the final accumulator (the provided `initialValue` when there are zero
++ * visited children).
++ *
++ * @param {?*} children Children tree container.
++ * @param {function(*, *, int)} reducer The reduce function.
++ * @param {*} initialValue The initial accumulator value.
++ * @return {*} The final accumulator.
++ */
++function reduceChildren<T>(
++  children: ?ReactNodeList,
++  reducer: ReduceFunc<T>,
++  initialValue: T,
++): T {
++  let accumulator: T = initialValue;
++  traverseAllChildren(
++    children,
++    function (ctx, child, childKey, index) {
++      accumulator = reducer(accumulator, child, index);
++    },
++    undefined,
++  );
++  return accumulator;
++}
++
++/**
++ * Return a flat array of the surviving children, re-keyed exactly as `toArray`
++ * would key them. Element children carry the prefixed traversal key; non-element
++ * leaves (strings/numbers) are returned unchanged.
++ *
++ * @param {?*} children Children tree container.
++ * @param {function(*, int)} predicate The filter predicate.
++ * @param {*} context Context for the predicate.
++ * @return {Array} The surviving children.
++ */
++function filterChildren(
++  children: ?ReactNodeList,
++  predicate: PredicateFunc,
++  context: mixed,
++): Array<React$Node> {
++  const result: Array<React$Node> = [];
++  traverseAllChildren(
++    children,
++    function (ctx, child, childKey, index) {
++      if (predicate.call(ctx, child, index)) {
++        // Re-key surviving elements to the fully-qualified traversal key so the
++        // output matches `toArray` for the same positions. Portals and
++        // string/number leaves pass through unchanged.
++        result.push(cloneAndReplaceKeyForChild(child, childKey));
++      }
++    },
++    context,
++  );
++  return result;
++}
++
++/**
++ * Return the first child matching the predicate, or `undefined`. The returned
++ * node is the original, un-rekeyed child, and traversal stops early after the
++ * first match.
++ *
++ * @param {?*} children Children tree container.
++ * @param {function(*, int)} predicate The find predicate.
++ * @param {*} context Context for the predicate.
++ * @return {*} The first matching child, or undefined.
++ */
++function findChild(
++  children: ?ReactNodeList,
++  predicate: PredicateFunc,
++  context: mixed,
++): ?React$Node {
++  let found: ?React$Node = undefined;
++  traverseAllChildren(
++    children,
++    function (ctx, child, childKey, index) {
++      if (predicate.call(ctx, child, index)) {
++        found = child;
++        // Returning `false` sets `traversalState.stopped`, which propagates
++        // through any surrounding nested arrays/iterables so the single pass
++        // ends immediately after the first match.
++        return false;
++      }
++    },
++    context,
++  );
++  return found;
++}
++
++/**
++ * Return Array<{key, node}> pairing every surviving child with the
++ * fully-qualified traversal key React assigns it. Element children carry the
++ * prefixed key, matching `toArray`; other leaves pass through unchanged.
++ *
++ * @param {?*} children Children tree container.
++ * @return {Array<{key: string, node: *}>}
++ */
++function toKeyedArray(
++  children: ?ReactNodeList,
++): Array<{key: string, node: React$Node}> {
++  const result: Array<{key: string, node: React$Node}> = [];
++  traverseAllChildren(
++    children,
++    function (ctx, child, childKey, index) {
++      result.push({
++        key: childKey,
++        node: cloneAndReplaceKeyForChild(child, childKey),
++      });
++    },
++    undefined,
++  );
++  return result;
++}
++
+ export {
+   forEachChildren as forEach,
+   mapChildren as map,
+   countChildren as count,
+   onlyChild as only,
+   toArray,
++  reduceChildren,
++  filterChildren,
++  findChild,
++  toKeyedArray,
+ };
+diff --git a/packages/react/src/ReactClient.js b/packages/react/src/ReactClient.js
+index 5d1c7f3..f5050d5 100644
+--- a/packages/react/src/ReactClient.js
++++ b/packages/react/src/ReactClient.js
+@@ -24,7 +24,17 @@ import {
+ 
+ import {Component, PureComponent} from './ReactBaseClasses';
+ import {createRef} from './ReactCreateRef';
+-import {forEach, map, count, toArray, only} from './ReactChildren';
++import {
++  forEach,
++  map,
++  count,
++  toArray,
++  only,
++  reduceChildren,
++  filterChildren,
++  findChild,
++  toKeyedArray,
++} from './ReactChildren';
+ import {
+   createElement,
+   cloneElement,
+@@ -71,6 +81,10 @@ const Children = {
+   count,
+   toArray,
+   only,
++  reduce: reduceChildren,
++  filter: filterChildren,
++  find: findChild,
++  toKeyedArray,
+ };
+ 
+ export {
+diff --git a/packages/react/src/ReactServer.js b/packages/react/src/ReactServer.js
+index 81d83cb..1ac210b 100644
+--- a/packages/react/src/ReactServer.js
++++ b/packages/react/src/ReactServer.js
+@@ -9,7 +9,17 @@
+ 
+ export {default as __SERVER_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE} from './ReactSharedInternalsServer';
+ 
+-import {forEach, map, count, toArray, only} from './ReactChildren';
++import {
++  forEach,
++  map,
++  count,
++  toArray,
++  only,
++  reduceChildren,
++  filterChildren,
++  findChild,
++  toKeyedArray,
++} from './ReactChildren';
+ import {
+   REACT_ACTIVITY_TYPE,
+   REACT_FRAGMENT_TYPE,
+@@ -38,6 +48,10 @@ const Children = {
+   count,
+   toArray,
+   only,
++  reduce: reduceChildren,
++  filter: filterChildren,
++  find: findChild,
++  toKeyedArray,
+ };
+ 
+ export {
+diff --git a/packages/react/src/jsx/ReactJSXElement.js b/packages/react/src/jsx/ReactJSXElement.js
+index 0d1b46f..5c71003 100644
+--- a/packages/react/src/jsx/ReactJSXElement.js
++++ b/packages/react/src/jsx/ReactJSXElement.js
+@@ -14,6 +14,7 @@ import {
+   REACT_FRAGMENT_TYPE,
+   REACT_LAZY_TYPE,
+   REACT_OPTIMISTIC_KEY,
++  isReactChildElement,
+ } from 'shared/ReactSymbols';
+ import {checkKeyStringCoercion} from 'shared/CheckStringCoercion';
+ import isArray from 'shared/isArray';
+@@ -763,6 +764,23 @@ export function cloneAndReplaceKey(oldElement, newKey) {
+   return clonedElement;
+ }
+ 
++/**
++ * Re-key a single traversed child using its fully-qualified traversal key.
++ *
++ * This mirrors the element re-keying that `mapIntoArray` performs for
++ * `toArray`: only genuine React elements are re-keyed, so filter/toKeyedArray
++ * assign the exact same keys `toArray` does. Portals (which are element-like by
++ * `$$typeof` but are not valid elements) and non-element leaves such as
++ * strings, numbers, and bigints are passed straight through unchanged. Shared
++ * by the functional `React.Children` traversal utilities.
++ */
++export function cloneAndReplaceKeyForChild(child, newKey) {
++  if (isReactChildElement(child) && isValidElement(child)) {
++    return cloneAndReplaceKey(child, newKey);
++  }
++  return child;
++}
++
+ /**
+  * Clone and return a new ReactElement using element as the starting point.
+  * See https://reactjs.org/docs/react-api.html#cloneelement
+diff --git a/packages/shared/ReactChildKeyPath.js b/packages/shared/ReactChildKeyPath.js
+new file mode 100644
+index 0000000..004c912
+--- /dev/null
++++ b/packages/shared/ReactChildKeyPath.js
+@@ -0,0 +1,84 @@
++/**
++ * Copyright (c) Meta Platforms, Inc. and affiliates.
++ *
++ * This source code is licensed under the MIT license found in the
++ * LICENSE file in the root directory of this source tree.
++ *
++ * @flow
++ */
++
++import {checkKeyStringCoercion} from 'shared/CheckStringCoercion';
++import {enableOptimisticKey} from 'shared/ReactFeatureFlags';
++import {REACT_OPTIMISTIC_KEY} from 'shared/ReactSymbols';
++
++// The separators used to build up the fully-qualified traversal key that React
++// assigns to each flattened child. `SEPARATOR` prefixes a top-level key while
++// `SUBSEPARATOR` joins nested levels. These are shared between the existing
++// `React.Children` utilities (map/forEach/count/toArray/only) and the newer
++// functional traversal utilities (reduce/filter/find/toKeyedArray) so that
++// every helper keys elements bit-for-bit identically.
++export const SEPARATOR: string = '.';
++export const SUBSEPARATOR: string = ':';
++
++/**
++ * Escape and wrap key so it is safe to use as a reactid
++ *
++ * @param {string} key to be escaped.
++ * @return {string} the escaped key.
++ */
++function escape(key: string): string {
++  const escapeRegex = /[=:]/g;
++  const escaperLookup = {
++    '=': '=0',
++    ':': '=2',
++  };
++  const escapedString = key.replace(escapeRegex, function (match) {
++    // $FlowFixMe[invalid-computed-prop]
++    return escaperLookup[match];
++  });
++
++  return '$' + escapedString;
++}
++
++const userProvidedKeyEscapeRegex = /\/+/g;
++
++/**
++ * Escape a user-provided key so it can be safely embedded as a prefix within a
++ * larger traversal key. Every run of `/` characters is doubled so the escaped
++ * value round-trips through the `/`-delimited prefix accumulation performed by
++ * the mapping traversal.
++ *
++ * @param {string} text
++ * @return {string}
++ */
++export function escapeUserProvidedKey(text: string): string {
++  return text.replace(userProvidedKeyEscapeRegex, '$&/');
++}
++
++/**
++ * Generate a key string that identifies a element within a set.
++ *
++ * @param {*} element A element that could contain a manual key.
++ * @param {number} index Index that is used if a manual key is not provided.
++ * @return {string}
++ */
++export function getElementKey(element: any, index: number): string {
++  // Do some typechecking here since we call this blindly. We want to ensure
++  // that we don't block potential future ES APIs.
++  if (typeof element === 'object' && element !== null && element.key != null) {
++    if (enableOptimisticKey && element.key === REACT_OPTIMISTIC_KEY) {
++      // For React.Children purposes this is treated as just null.
++      if (__DEV__) {
++        console.error("React.Children helpers don't support optimisticKey.");
++      }
++      return index.toString(36);
++    }
++    // Explicit key
++    if (__DEV__) {
++      checkKeyStringCoercion(element.key);
++    }
++    return escape('' + element.key);
++  }
++  // Implicit key determined by the index in the set
++  return index.toString(36);
++}
+diff --git a/packages/shared/ReactSymbols.js b/packages/shared/ReactSymbols.js
+index a4c8753..38bb228 100644
+--- a/packages/shared/ReactSymbols.js
++++ b/packages/shared/ReactSymbols.js
+@@ -70,6 +70,21 @@ export const REACT_OPTIMISTIC_KEY: ReactOptimisticKey = Symbol.for(
+   'react.optimistic_key',
+ ) as any;
+ 
++/**
++ * Returns true when `child` is an element-like React child (a React element or
++ * a portal) as identified by its `$$typeof` tag. Shared by the `React.Children`
++ * traversal utilities so that both the existing helpers and the new functional
++ * utilities agree on which children carry a re-keyable `$$typeof`. No new symbol
++ * is introduced; this reuses the existing element-type checks.
++ */
++export function isReactChildElement(child: mixed): boolean {
++  if (typeof child !== 'object' || child === null) {
++    return false;
++  }
++  const $$typeof = (child: any).$$typeof;
++  return $$typeof === REACT_ELEMENT_TYPE || $$typeof === REACT_PORTAL_TYPE;
++}
++
+ // This is actually a symbol but Flow doesn't support comparison of symbols to refine.
+ // We use a boolean since in our code we often expect string (key) or number (index),
+ // so by pretending to be a boolean we cover a lot of cases that don't consider this case.
+diff --git a/packages/react/index.js b/packages/react/index.js
+index 140174e..da6859e 100644
+--- a/packages/react/index.js
++++ b/packages/react/index.js
+@@ -24,6 +24,15 @@ export type ElementConfig<C> = React$ElementConfig<C>;
+ export type ElementRef<C> = React.ElementRef<C>;
+ export type ChildrenArray<+T> = $ReadOnlyArray<ChildrenArray<T>> | T;
+ 
++// The `Children` namespace re-exported below now additionally carries the
++// functional traversal utilities `reduce`, `filter`, `find`, and
++// `toKeyedArray` alongside `map`/`forEach`/`count`/`toArray`/`only`. They ride
++// along on the same `Children` namespace object so every entry point that
++// re-exports `Children` exposes them without leaking extra production symbols.
++// `KeyedChild` describes a single `{key, node}` pair returned by
++// `React.Children.toKeyedArray`.
++export type KeyedChild = {key: string, node: React$Node};
++
+ export {
+   __CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE,
+   __COMPILER_RUNTIME,

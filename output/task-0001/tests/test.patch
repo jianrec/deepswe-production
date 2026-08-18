@@ -1,0 +1,789 @@
+diff --git a/api/src/daily-coding-challenge/routes/daily-coding-challenge.streak.spec.ts b/api/src/daily-coding-challenge/routes/daily-coding-challenge.streak.spec.ts
+new file mode 100644
+index 00000000..7c89e481
+--- /dev/null
++++ b/api/src/daily-coding-challenge/routes/daily-coding-challenge.streak.spec.ts
+@@ -0,0 +1,67 @@
++import { describe, it, expect } from 'vitest';
++import { readFileSync } from 'node:fs';
++
++/**
++ * Contract tests verifying that the Daily Coding Challenge GET routes
++ * expose streak fields in their response schemas.
++ */
++
++import { dailyCodingChallenge } from '../schemas/daily-coding-challenge.js';
++
++describe('Daily Coding Challenge GET route streak schema contracts', () => {
++  it('date route 200 response schema exists', () => {
++    expect(dailyCodingChallenge.date.response[200]).toBeDefined();
++  });
++
++  it('day route 200 response schema exists', () => {
++    expect(dailyCodingChallenge.day.response[200]).toBeDefined();
++  });
++
++  it('today route 200 response schema exists', () => {
++    expect(dailyCodingChallenge.today.response[200]).toBeDefined();
++  });
++
++  it('month route 200 response schema exists', () => {
++    expect(dailyCodingChallenge.month.response[200]).toBeDefined();
++  });
++
++  it('all route 200 response schema exists', () => {
++    expect(dailyCodingChallenge.all.response[200]).toBeDefined();
++  });
++
++  it('newest route 200 response schema exists', () => {
++    expect(dailyCodingChallenge.newest.response[200]).toBeDefined();
++  });
++
++  it('single challenge response includes required base fields', () => {
++    const schema = dailyCodingChallenge.date.response[200];
++    const props = (schema as any).properties;
++    expect(props.id).toBeDefined();
++    expect(props.date).toBeDefined();
++    expect(props.challengeNumber).toBeDefined();
++    expect(props.title).toBeDefined();
++    expect(props.description).toBeDefined();
++    expect(props.javascript).toBeDefined();
++    expect(props.python).toBeDefined();
++  });
++
++  it('error responses maintain backward compatible shape', () => {
++    const err400 = dailyCodingChallenge.date.response[400];
++    const err404 = dailyCodingChallenge.date.response[404];
++    const err500 = dailyCodingChallenge.date.response[500];
++    expect((err400 as any).properties.type).toBeDefined();
++    expect((err400 as any).properties.message).toBeDefined();
++    expect((err404 as any).properties.type).toBeDefined();
++    expect((err500 as any).properties.type).toBeDefined();
++  });
++
++  it('today route reads the signed-in user streak state', () => {
++    const source = readFileSync(
++      new URL('./daily-coding-challenge.ts', import.meta.url),
++      'utf8'
++    );
++    expect(source).toContain('completedDailyCodingChallenges: true');
++    expect(source).toContain('resolveDailyCodingChallengeStreak');
++    expect(source).toContain('...streak');
++  });
++});
+diff --git a/api/src/routes/protected/challenge.streak.spec.ts b/api/src/routes/protected/challenge.streak.spec.ts
+new file mode 100644
+index 00000000..0388b981
+--- /dev/null
++++ b/api/src/routes/protected/challenge.streak.spec.ts
+@@ -0,0 +1,136 @@
++import { describe, it, expect } from 'vitest';
++import { readFileSync } from 'node:fs';
++
++/**
++ * Integration contract tests for Daily Coding Challenge streak persistence.
++ * These tests import the route module and schema to verify that streak fields
++ * are present in the response shape and recomputation logic is wired.
++ *
++ * Since the Oracle patch is absent, these tests validate the EXPECTED contract.
++ * They will fail until the implementation adds streak fields.
++ */
++
++// Import schemas to verify TypeBox definitions include streak fields
++import { dailyCodingChallengeCompleted } from '../../schemas/challenge/daily-coding-challenge-completed.js';
++import { getSessionUser } from '../../schemas/user/get-session-user.js';
++
++function getSessionUserProperties() {
++  const userRecord = (getSessionUser.response[200] as any).properties.user;
++  const recordSchema = Object.values(userRecord.patternProperties)[0] as any;
++  return recordSchema.properties;
++}
++
++describe('Daily Coding Challenge streak integration contracts', () => {
++  it('dailyCodingChallengeCompleted response schema includes currentStreak', () => {
++    const schema200 = dailyCodingChallengeCompleted.response[200];
++    expect(schema200).toBeDefined();
++    // The schema must have currentStreak as a property
++    const props = (schema200 as any).properties;
++    expect(props).toBeDefined();
++    expect(props.currentStreak).toBeDefined();
++  });
++
++  it('dailyCodingChallengeCompleted response schema includes longestStreak', () => {
++    const schema200 = dailyCodingChallengeCompleted.response[200];
++    const props = (schema200 as any).properties;
++    expect(props.longestStreak).toBeDefined();
++  });
++
++  it('dailyCodingChallengeCompleted response schema includes lastCompletionDay', () => {
++    const schema200 = dailyCodingChallengeCompleted.response[200];
++    const props = (schema200 as any).properties;
++    expect(props.lastCompletionDay).toBeDefined();
++  });
++
++  it('getSessionUser response schema user object includes currentStreak', () => {
++    const schema200 = getSessionUser.response[200];
++    expect(getSessionUserProperties().currentStreak).toBeDefined();
++  });
++
++  it('getSessionUser response schema user object includes longestStreak', () => {
++    expect(getSessionUserProperties().longestStreak).toBeDefined();
++  });
++
++  it('getSessionUser response schema user object includes lastCompletionDay', () => {
++    expect(getSessionUserProperties().lastCompletionDay).toBeDefined();
++  });
++
++  it('streak fields in completion schema are non-negative integers', () => {
++    const schema200 = dailyCodingChallengeCompleted.response[200];
++    const props = (schema200 as any).properties;
++    // TypeBox Integer type has minimum: 0
++    expect(props.currentStreak.minimum).toBe(0);
++    expect(props.longestStreak.minimum).toBe(0);
++  });
++
++  it('lastCompletionDay in completion schema allows null', () => {
++    const schema200 = dailyCodingChallengeCompleted.response[200];
++    const props = (schema200 as any).properties;
++    // Should be Union of String and Null, or nullable string
++    const lcd = props.lastCompletionDay;
++    const isNullable =
++      lcd.anyOf !== undefined ||
++      lcd.type === 'null' ||
++      (Array.isArray(lcd.type) && lcd.type.includes('null'));
++    expect(isNullable).toBe(true);
++  });
++
++  it('existing completion response fields remain unchanged', () => {
++    const schema200 = dailyCodingChallengeCompleted.response[200];
++    const props = (schema200 as any).properties;
++    expect(props.completedDate).toBeDefined();
++    expect(props.points).toBeDefined();
++    expect(props.alreadyCompleted).toBeDefined();
++    expect(props.completedDailyCodingChallenges).toBeDefined();
++  });
++
++  it('existing session user fields remain unchanged', () => {
++    const props = getSessionUserProperties();
++    expect(props.username).toBeDefined();
++    expect(props.email).toBeDefined();
++    expect(props.completedChallenges).toBeDefined();
++    expect(props.completedDailyCodingChallenges).toBeDefined();
++  });
++
++  it('completion handler recomputes from full history', () => {
++    const source = readFileSync(
++      new URL('./challenge.ts', import.meta.url),
++      'utf8'
++    );
++    const handler = source.slice(
++      source.indexOf('async function postDailyCodingChallengeCompleted'),
++      source.indexOf('async function postSaveChallenge')
++    );
++    expect(handler).toContain('computeDailyCodingChallengeStreak');
++    expect(handler).toContain('completedDailyCodingChallenges');
++  });
++
++  it('completion handler persists every derived streak field', () => {
++    const source = readFileSync(
++      new URL('./challenge.ts', import.meta.url),
++      'utf8'
++    );
++    const mapper = readFileSync(
++      new URL('../../daily-coding-challenge/utils/streak.ts', import.meta.url),
++      'utf8'
++    );
++    expect(source).toContain('toDailyCodingChallengeStreakUpdate');
++    expect(mapper).toContain('currentDailyCodingChallengeStreak');
++    expect(mapper).toContain('longestDailyCodingChallengeStreak');
++    expect(mapper).toContain('lastDailyCodingChallengeCompletionDay');
++  });
++
++  it('completion responses expose the canonical streak result', () => {
++    const source = readFileSync(
++      new URL('./challenge.ts', import.meta.url),
++      'utf8'
++    );
++    const handler = source.slice(
++      source.indexOf('async function postDailyCodingChallengeCompleted'),
++      source.indexOf('async function postSaveChallenge')
++    );
++    expect(
++      handler.match(/\.\.\.streak(?=[,\n])/g)?.length
++    ).toBeGreaterThanOrEqual(3);
++  });
++});
+diff --git a/api/src/routes/protected/user.streak.spec.ts b/api/src/routes/protected/user.streak.spec.ts
+new file mode 100644
+index 00000000..3e790943
+--- /dev/null
++++ b/api/src/routes/protected/user.streak.spec.ts
+@@ -0,0 +1,76 @@
++import { describe, it, expect } from 'vitest';
++
++/**
++ * Contract tests for session-user endpoint streak field exposure.
++ * Validates TypeBox schema structure without requiring a running server.
++ */
++
++import { getSessionUser } from '../../schemas/user/get-session-user.js';
++
++describe('Session user streak schema validation', () => {
++  const getUserProps = () => {
++    const schema200 = getSessionUser.response[200];
++    const userRecord = (schema200 as any).properties.user;
++    const recordSchema = Object.values(userRecord.patternProperties)[0] as any;
++    return recordSchema.properties;
++  };
++
++  it('user schema has currentStreak field', () => {
++    const props = getUserProps();
++    expect(props.currentStreak).toBeDefined();
++  });
++
++  it('user schema has longestStreak field', () => {
++    const props = getUserProps();
++    expect(props.longestStreak).toBeDefined();
++  });
++
++  it('user schema has lastCompletionDay field', () => {
++    const props = getUserProps();
++    expect(props.lastCompletionDay).toBeDefined();
++  });
++
++  it('currentStreak is typed as integer with minimum 0', () => {
++    const props = getUserProps();
++    const cs = props.currentStreak;
++    expect(cs.type).toBe('integer');
++    expect(cs.minimum).toBe(0);
++  });
++
++  it('longestStreak is typed as integer with minimum 0', () => {
++    const props = getUserProps();
++    const ls = props.longestStreak;
++    expect(ls.type).toBe('integer');
++    expect(ls.minimum).toBe(0);
++  });
++
++  it('lastCompletionDay is nullable string', () => {
++    const props = getUserProps();
++    const lcd = props.lastCompletionDay;
++    const isNullable =
++      lcd.anyOf !== undefined ||
++      lcd.type === 'null' ||
++      (Array.isArray(lcd.type) && lcd.type.includes('null'));
++    expect(isNullable).toBe(true);
++  });
++
++  it('backward compatibility: username field still present', () => {
++    const props = getUserProps();
++    expect(props.username).toBeDefined();
++  });
++
++  it('backward compatibility: completedDailyCodingChallenges still present', () => {
++    const props = getUserProps();
++    expect(props.completedDailyCodingChallenges).toBeDefined();
++  });
++
++  it('backward compatibility: points field still present', () => {
++    const props = getUserProps();
++    expect(props.points).toBeDefined();
++  });
++
++  it('backward compatibility: calendar field still present', () => {
++    const props = getUserProps();
++    expect(props.calendar).toBeDefined();
++  });
++});
+diff --git a/api/src/utils/streak.boundary.test.ts b/api/src/utils/streak.boundary.test.ts
+new file mode 100644
+index 00000000..903a5d06
+--- /dev/null
++++ b/api/src/utils/streak.boundary.test.ts
+@@ -0,0 +1,97 @@
++import { describe, it, expect } from 'vitest';
++import { computeStreak } from './streak.js';
++
++const DAY_MS = 86400000;
++const toUtcDay = (d: Date) => d.toISOString().slice(0, 10);
++
++describe('computeStreak boundary and timezone edge cases', () => {
++  it('completion at exact UTC midnight boundary counts as that day', () => {
++    // 2025-06-15T00:00:00.000Z
++    const midnight = new Date('2025-06-15T00:00:00.000Z');
++    const result = computeStreak([midnight.getTime()]);
++    expect(result.lastCompletionDay).toBe('2025-06-15');
++  });
++
++  it('completion one ms before UTC midnight counts as previous day', () => {
++    const justBefore = new Date('2025-06-15T23:59:59.999Z');
++    const result = computeStreak([justBefore.getTime()]);
++    expect(result.lastCompletionDay).toBe('2025-06-15');
++  });
++
++  it('two completions on same UTC day different local times deduplicate', () => {
++    const day1a = new Date('2025-06-15T01:00:00.000Z').getTime();
++    const day1b = new Date('2025-06-15T23:00:00.000Z').getTime();
++    const result = computeStreak([day1a, day1b]);
++    expect(result.currentStreak).toBeLessThanOrEqual(1);
++    expect(result.longestStreak).toBe(1);
++  });
++
++  it('consecutive UTC days across month boundary', () => {
++    const jan31 = new Date('2025-01-31T12:00:00.000Z').getTime();
++    const feb1 = new Date('2025-02-01T12:00:00.000Z').getTime();
++    const result = computeStreak([jan31, feb1]);
++    expect(result.longestStreak).toBe(2);
++  });
++
++  it('consecutive UTC days across year boundary', () => {
++    const dec31 = new Date('2024-12-31T12:00:00.000Z').getTime();
++    const jan1 = new Date('2025-01-01T12:00:00.000Z').getTime();
++    const result = computeStreak([dec31, jan1]);
++    expect(result.longestStreak).toBe(2);
++  });
++
++  it('leap year Feb 29 handled correctly', () => {
++    const feb28 = new Date('2024-02-28T12:00:00.000Z').getTime();
++    const feb29 = new Date('2024-02-29T12:00:00.000Z').getTime();
++    const mar1 = new Date('2024-03-01T12:00:00.000Z').getTime();
++    const result = computeStreak([feb28, feb29, mar1]);
++    expect(result.longestStreak).toBe(3);
++  });
++
++  it('empty array returns deterministic zero state', () => {
++    const r1 = computeStreak([]);
++    const r2 = computeStreak([]);
++    expect(r1).toEqual(r2);
++    expect(r1.currentStreak).toBe(0);
++    expect(r1.longestStreak).toBe(0);
++    expect(r1.lastCompletionDay).toBeNull();
++  });
++
++  it('single element array always yields longestStreak 1', () => {
++    const result = computeStreak([new Date('2020-03-15T00:00:00Z').getTime()]);
++    expect(result.longestStreak).toBe(1);
++  });
++
++  it('currentStreak 0 when gap of exactly 2 days from today', () => {
++    const twoDaysAgo = toUtcDay(new Date(Date.now() - 2 * DAY_MS));
++    const result = computeStreak([twoDaysAgo]);
++    expect(result.currentStreak).toBe(0);
++  });
++
++  it('currentStreak 1 when gap of exactly 1 day from today (yesterday)', () => {
++    const yesterday = toUtcDay(new Date(Date.now() - 1 * DAY_MS));
++    const result = computeStreak([yesterday]);
++    expect(result.currentStreak).toBe(1);
++  });
++
++  it('very long streak (365 days) computes correctly', () => {
++    const days: string[] = [];
++    for (let i = 0; i < 365; i++) {
++      days.push(toUtcDay(new Date(Date.now() - i * DAY_MS)));
++    }
++    const result = computeStreak(days);
++    expect(result.currentStreak).toBe(365);
++    expect(result.longestStreak).toBe(365);
++  });
++
++  it('interleaved duplicates in long streak do not affect result', () => {
++    const days: string[] = [];
++    for (let i = 0; i < 30; i++) {
++      const d = toUtcDay(new Date(Date.now() - i * DAY_MS));
++      days.push(d, d, d);
++    }
++    const result = computeStreak(days);
++    expect(result.currentStreak).toBe(30);
++    expect(result.longestStreak).toBe(30);
++  });
++});
+diff --git a/api/src/utils/streak.property.test.ts b/api/src/utils/streak.property.test.ts
+new file mode 100644
+index 00000000..24dac6ba
+--- /dev/null
++++ b/api/src/utils/streak.property.test.ts
+@@ -0,0 +1,97 @@
++import { describe, it, expect } from 'vitest';
++import { computeStreak } from './streak.js';
++
++const DAY_MS = 86400000;
++const toUtcDay = (d: Date) => d.toISOString().slice(0, 10);
++
++// Deterministic PRNG (xorshift32)
++function createRng(seed: number) {
++  let state = seed >>> 0;
++  return () => {
++    state ^= state << 13;
++    state ^= state >> 17;
++    state ^= state << 5;
++    return (state >>> 0) / 4294967296;
++  };
++}
++
++function generateCompletionDays(
++  rng: () => number,
++  count: number,
++  maxDaysAgo: number
++): string[] {
++  const days: string[] = [];
++  for (let i = 0; i < count; i++) {
++    const daysAgo = Math.floor(rng() * maxDaysAgo);
++    const d = new Date(Date.now() - daysAgo * DAY_MS);
++    days.push(toUtcDay(d));
++  }
++  return days;
++}
++
++describe('computeStreak property-based regression suite', () => {
++  const seeds = Array.from({ length: 50 }, (_, i) => i * 7 + 13);
++
++  for (const seed of seeds) {
++    it(`seed=${seed}: streak invariants hold`, () => {
++      const rng = createRng(seed);
++      const days = generateCompletionDays(
++        rng,
++        20 + Math.floor(rng() * 30),
++        400
++      );
++      const result = computeStreak(days);
++
++      // Non-negative integers
++      expect(result.currentStreak).toBeGreaterThanOrEqual(0);
++      expect(result.longestStreak).toBeGreaterThanOrEqual(0);
++      expect(Number.isInteger(result.currentStreak)).toBe(true);
++      expect(Number.isInteger(result.longestStreak)).toBe(true);
++
++      // longest >= current
++      expect(result.longestStreak).toBeGreaterThanOrEqual(result.currentStreak);
++
++      // lastCompletionDay format or null
++      if (result.lastCompletionDay !== null) {
++        expect(result.lastCompletionDay).toMatch(/^\d{4}-\d{2}-\d{2}$/);
++      }
++
++      // Idempotency: duplicating all entries yields same result
++      const duplicated = [...days, ...days];
++      const resultDup = computeStreak(duplicated);
++      expect(resultDup).toEqual(result);
++
++      // Adding a very old day doesn't increase currentStreak
++      const veryOld = toUtcDay(new Date(Date.now() - 1000 * DAY_MS));
++      const withOld = computeStreak([...days, veryOld]);
++      expect(withOld.currentStreak).toBeLessThanOrEqual(result.currentStreak);
++    });
++  }
++
++  const edgeSeeds = Array.from({ length: 50 }, (_, i) => i * 31 + 997);
++  for (const seed of edgeSeeds) {
++    it(`edge-seed=${seed}: boundary and duplicate stress`, () => {
++      const rng = createRng(seed);
++      // Generate many duplicates of few days
++      const uniqueCount = 1 + Math.floor(rng() * 5);
++      const baseDays: string[] = [];
++      for (let i = 0; i < uniqueCount; i++) {
++        const daysAgo = Math.floor(rng() * 10);
++        baseDays.push(toUtcDay(new Date(Date.now() - daysAgo * DAY_MS)));
++      }
++      // Duplicate each 3-10 times
++      const expanded: string[] = [];
++      for (const d of baseDays) {
++        const reps = 3 + Math.floor(rng() * 8);
++        for (let r = 0; r < reps; r++) expanded.push(d);
++      }
++
++      const result = computeStreak(expanded);
++      const resultUnique = computeStreak(baseDays);
++
++      expect(result).toEqual(resultUnique);
++      expect(result.currentStreak).toBeGreaterThanOrEqual(0);
++      expect(result.longestStreak).toBeGreaterThanOrEqual(result.currentStreak);
++    });
++  }
++});
+diff --git a/api/src/utils/streak.regression.test.ts b/api/src/utils/streak.regression.test.ts
+new file mode 100644
+index 00000000..af2434b8
+--- /dev/null
++++ b/api/src/utils/streak.regression.test.ts
+@@ -0,0 +1,109 @@
++import { describe, it, expect } from 'vitest';
++import { computeStreak } from './streak.js';
++
++const DAY_MS = 86400000;
++const toUtcDay = (d: Date) => d.toISOString().slice(0, 10);
++
++/**
++ * Regression tests ensuring specific known scenarios produce correct results.
++ * These serve as pinned acceptance criteria checks.
++ */
++describe('computeStreak regression pinning tests', () => {
++  it('AC: empty history yields zeros and null', () => {
++    const r = computeStreak([]);
++    expect(r).toEqual({
++      currentStreak: 0,
++      longestStreak: 0,
++      lastCompletionDay: null
++    });
++  });
++
++  it('AC: duplicate completions same day do not increase streak', () => {
++    const today = toUtcDay(new Date());
++    const r = computeStreak([today, today, today, today]);
++    expect(r.currentStreak).toBe(1);
++    expect(r.longestStreak).toBe(1);
++  });
++
++  it('AC: currentStreak counts consecutive ending today', () => {
++    const days = [0, 1, 2].map(n =>
++      toUtcDay(new Date(Date.now() - n * DAY_MS))
++    );
++    const r = computeStreak(days);
++    expect(r.currentStreak).toBe(3);
++  });
++
++  it('AC: currentStreak counts consecutive ending yesterday', () => {
++    const days = [1, 2, 3].map(n =>
++      toUtcDay(new Date(Date.now() - n * DAY_MS))
++    );
++    const r = computeStreak(days);
++    expect(r.currentStreak).toBe(3);
++  });
++
++  it('AC: currentStreak 0 when latest > yesterday', () => {
++    const old = toUtcDay(new Date(Date.now() - 3 * DAY_MS));
++    const r = computeStreak([old]);
++    expect(r.currentStreak).toBe(0);
++  });
++
++  it('AC: longestStreak equals max consecutive run', () => {
++    const base = new Date('2025-03-01T00:00:00Z');
++    const days = [
++      toUtcDay(new Date(base.getTime())),
++      toUtcDay(new Date(base.getTime() + DAY_MS)),
++      toUtcDay(new Date(base.getTime() + 2 * DAY_MS)),
++      // gap
++      toUtcDay(new Date(base.getTime() + 5 * DAY_MS)),
++      toUtcDay(new Date(base.getTime() + 6 * DAY_MS))
++    ];
++    const r = computeStreak(days);
++    expect(r.longestStreak).toBe(3);
++  });
++
++  it('AC: longestStreak >= currentStreak invariant', () => {
++    const days = [0, 1, 5, 6, 7, 8, 9].map(n =>
++      toUtcDay(new Date(Date.now() - n * DAY_MS))
++    );
++    const r = computeStreak(days);
++    expect(r.longestStreak).toBeGreaterThanOrEqual(r.currentStreak);
++  });
++
++  it('AC: recomputation idempotency', () => {
++    const days = [0, 1, 2, 3].map(n =>
++      toUtcDay(new Date(Date.now() - n * DAY_MS))
++    );
++    const r1 = computeStreak(days);
++    const r2 = computeStreak([...days, days[0]!, days[1]!]);
++    expect(r1).toEqual(r2);
++  });
++
++  it('AC: accepts numeric timestamps', () => {
++    const now = Date.now();
++    const r = computeStreak([now, now - DAY_MS]);
++    expect(r.currentStreak).toBe(2);
++    expect(r.longestStreak).toBe(2);
++  });
++
++  it('AC: accepts ISO date strings', () => {
++    const today = toUtcDay(new Date());
++    const r = computeStreak([today]);
++    expect(r.lastCompletionDay).toBe(today);
++  });
++
++  it('AC: streak values are non-negative integers', () => {
++    const r = computeStreak([Date.now()]);
++    expect(Number.isInteger(r.currentStreak)).toBe(true);
++    expect(Number.isInteger(r.longestStreak)).toBe(true);
++    expect(r.currentStreak).toBeGreaterThanOrEqual(0);
++    expect(r.longestStreak).toBeGreaterThanOrEqual(0);
++  });
++
++  it('AC: lastCompletionDay is YYYY-MM-DD or null', () => {
++    const r1 = computeStreak([]);
++    expect(r1.lastCompletionDay).toBeNull();
++
++    const r2 = computeStreak([Date.now()]);
++    expect(r2.lastCompletionDay).toMatch(/^\d{4}-\d{2}-\d{2}$/);
++  });
++});
+diff --git a/api/src/utils/streak.test.ts b/api/src/utils/streak.test.ts
+new file mode 100644
+index 00000000..00537be9
+--- /dev/null
++++ b/api/src/utils/streak.test.ts
+@@ -0,0 +1,165 @@
++import { describe, it, expect } from 'vitest';
++import { computeStreak } from './streak.js';
++
++const DAY_MS = 86400000;
++const toUtcDay = (d: Date) => d.toISOString().slice(0, 10);
++const daysAgo = (n: number) => new Date(Date.now() - n * DAY_MS);
++
++describe('computeStreak pure utility', () => {
++  it('returns zeros and null for empty history', () => {
++    const result = computeStreak([]);
++    expect(result.currentStreak).toBe(0);
++    expect(result.longestStreak).toBe(0);
++    expect(result.lastCompletionDay).toBeNull();
++  });
++
++  it('handles single completion today', () => {
++    const today = toUtcDay(new Date());
++    const result = computeStreak([today]);
++    expect(result.currentStreak).toBe(1);
++    expect(result.longestStreak).toBe(1);
++    expect(result.lastCompletionDay).toBe(today);
++  });
++
++  it('handles single completion yesterday', () => {
++    const yesterday = toUtcDay(daysAgo(1));
++    const result = computeStreak([yesterday]);
++    expect(result.currentStreak).toBe(1);
++    expect(result.longestStreak).toBe(1);
++    expect(result.lastCompletionDay).toBe(yesterday);
++  });
++
++  it('returns currentStreak 0 when last completion is older than yesterday', () => {
++    const twoDaysAgo = toUtcDay(daysAgo(2));
++    const result = computeStreak([twoDaysAgo]);
++    expect(result.currentStreak).toBe(0);
++    expect(result.longestStreak).toBe(1);
++    expect(result.lastCompletionDay).toBe(twoDaysAgo);
++  });
++
++  it('counts consecutive days ending today correctly', () => {
++    const days = [0, 1, 2, 3].map(n => toUtcDay(daysAgo(n)));
++    const result = computeStreak(days);
++    expect(result.currentStreak).toBe(4);
++    expect(result.longestStreak).toBe(4);
++  });
++
++  it('counts consecutive days ending yesterday correctly', () => {
++    const days = [1, 2, 3, 4].map(n => toUtcDay(daysAgo(n)));
++    const result = computeStreak(days);
++    expect(result.currentStreak).toBe(4);
++    expect(result.longestStreak).toBe(4);
++  });
++
++  it('deduplicates same-day completions', () => {
++    const today = toUtcDay(new Date());
++    const result = computeStreak([today, today, today]);
++    expect(result.currentStreak).toBe(1);
++    expect(result.longestStreak).toBe(1);
++  });
++
++  it('computes longestStreak across gaps', () => {
++    const base = new Date('2025-01-10T00:00:00Z');
++    const days = [
++      toUtcDay(new Date(base.getTime() - 0 * DAY_MS)),
++      toUtcDay(new Date(base.getTime() - 1 * DAY_MS)),
++      toUtcDay(new Date(base.getTime() - 2 * DAY_MS)),
++      // gap
++      toUtcDay(new Date(base.getTime() - 5 * DAY_MS)),
++      toUtcDay(new Date(base.getTime() - 6 * DAY_MS)),
++      toUtcDay(new Date(base.getTime() - 7 * DAY_MS)),
++      toUtcDay(new Date(base.getTime() - 8 * DAY_MS))
++    ];
++    const result = computeStreak(days);
++    expect(result.longestStreak).toBe(4);
++    expect(result.currentStreak).toBe(0); // old dates
++  });
++
++  it('longestStreak >= currentStreak always', () => {
++    const days = [0, 1, 3, 4, 5, 6].map(n => toUtcDay(daysAgo(n)));
++    const result = computeStreak(days);
++    expect(result.longestStreak).toBeGreaterThanOrEqual(result.currentStreak);
++  });
++
++  it('handles timestamps as numbers (ms since epoch)', () => {
++    const now = Date.now();
++    const result = computeStreak([now, now - DAY_MS, now - 2 * DAY_MS]);
++    expect(result.currentStreak).toBe(3);
++    expect(result.longestStreak).toBe(3);
++  });
++
++  it('handles mixed timestamp formats', () => {
++    const today = toUtcDay(new Date());
++    const yesterdayMs = Date.now() - DAY_MS;
++    const result = computeStreak([today, yesterdayMs]);
++    expect(result.currentStreak).toBe(2);
++  });
++
++  it('is idempotent for duplicate inputs', () => {
++    const days = [0, 1, 2].map(n => toUtcDay(daysAgo(n)));
++    const r1 = computeStreak(days);
++    const r2 = computeStreak([...days, ...days]);
++    expect(r1).toEqual(r2);
++  });
++
++  it('never returns negative streaks', () => {
++    const result = computeStreak(['2020-01-01']);
++    expect(result.currentStreak).toBeGreaterThanOrEqual(0);
++    expect(result.longestStreak).toBeGreaterThanOrEqual(0);
++  });
++
++  it('returns integer streak values', () => {
++    const days = [0, 1, 2, 4, 5].map(n => toUtcDay(daysAgo(n)));
++    const result = computeStreak(days);
++    expect(Number.isInteger(result.currentStreak)).toBe(true);
++    expect(Number.isInteger(result.longestStreak)).toBe(true);
++  });
++
++  it('lastCompletionDay is ISO date string format YYYY-MM-DD', () => {
++    const result = computeStreak([Date.now()]);
++    expect(result.lastCompletionDay).toMatch(/^\d{4}-\d{2}-\d{2}$/);
++  });
++
++  it('handles unsorted input', () => {
++    const days = [2, 0, 1].map(n => toUtcDay(daysAgo(n)));
++    const result = computeStreak(days);
++    expect(result.currentStreak).toBe(3);
++    expect(result.longestStreak).toBe(3);
++  });
++
++  it('handles large gap between completions', () => {
++    const days = [toUtcDay(daysAgo(0)), toUtcDay(daysAgo(365))];
++    const result = computeStreak(days);
++    expect(result.currentStreak).toBe(1);
++    expect(result.longestStreak).toBe(1);
++  });
++
++  it('timezone boundary: UTC day change does not leak local time', () => {
++    // A timestamp that is "tomorrow" in some timezone but still today in UTC
++    const utcNow = new Date();
++    const utcTodayStr = toUtcDay(utcNow);
++    const result = computeStreak([utcTodayStr]);
++    expect(result.lastCompletionDay).toBe(utcTodayStr);
++  });
++
++  it('property: adding an older day never increases currentStreak', () => {
++    const days = [0, 1, 2].map(n => toUtcDay(daysAgo(n)));
++    const before = computeStreak(days);
++    const after = computeStreak([...days, toUtcDay(daysAgo(10))]);
++    expect(after.currentStreak).toBe(before.currentStreak);
++  });
++
++  it('property: adding a duplicate day never changes streak values', () => {
++    const days = [0, 1, 2, 3].map(n => toUtcDay(daysAgo(n)));
++    const before = computeStreak(days);
++    const after = computeStreak([...days, days[0]!]);
++    expect(after).toEqual(before);
++  });
++
++  it('property: longestStreak is monotonic with added unique consecutive days', () => {
++    const days = [3, 2, 1].map(n => toUtcDay(daysAgo(n)));
++    const r1 = computeStreak(days);
++    const r2 = computeStreak([...days, toUtcDay(daysAgo(0))]);
++    expect(r2.longestStreak).toBeGreaterThanOrEqual(r1.longestStreak);
++  });
++});

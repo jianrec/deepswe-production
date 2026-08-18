@@ -1,0 +1,7 @@
+{
+  "mode": "remote-pinned-checkout",
+  "repository": "freeCodeCamp/freeCodeCamp",
+  "base_commit_hash": "645dbf7ba364a5377ac517cd7d4aba6310b2cf78",
+  "cache_path": "workspaces/repositories/freeCodeCamp__freeCodeCamp",
+  "remote_fetch_in_dockerfile": true
+}

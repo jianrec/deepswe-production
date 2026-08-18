@@ -1,0 +1,1620 @@
+diff --git a/hiddenrange/context_conditional_test.go b/hiddenrange/context_conditional_test.go
+new file mode 100644
+index 0000000..ee7e96b
+--- /dev/null
++++ b/hiddenrange/context_conditional_test.go
+@@ -0,0 +1,182 @@
++package hiddenrange_test
++
++import (
++	"bytes"
++	"errors"
++	"io"
++	"mime"
++	"mime/multipart"
++	"net/http"
++	"net/http/httptest"
++	"os"
++	"path/filepath"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/gin-gonic/gin"
++	"github.com/gin-gonic/gin/render"
++)
++
++func context_conditionalRequest(t *testing.T, maxRanges int, body string, headers map[string]string) *httptest.ResponseRecorder {
++	t.Helper()
++	gin.SetMode(gin.TestMode)
++	engine := gin.New()
++	engine.MaxRanges = maxRanges
++	engine.GET("/data", func(context *gin.Context) {
++		context.DataFromReaderRange(http.StatusOK, int64(len(body)), "text/plain", bytes.NewReader([]byte(body)), headers)
++	})
++	recorder := httptest.NewRecorder()
++	request := httptest.NewRequest(http.MethodGet, "/data", nil)
++	for key, value := range headers {
++		if key == "ETag" || key == "Last-Modified" {
++			continue
++		}
++		request.Header.Set(key, value)
++	}
++	engine.ServeHTTP(recorder, request)
++	return recorder
++}
++
++func context_conditionalParts(t *testing.T, recorder *httptest.ResponseRecorder) []string {
++	t.Helper()
++	mediaType, parameters, err := mime.ParseMediaType(recorder.Header().Get("Content-Type"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	if mediaType != "multipart/byteranges" {
++		t.Fatalf("Content-Type = %q", recorder.Header().Get("Content-Type"))
++	}
++	reader := multipart.NewReader(recorder.Body, parameters["boundary"])
++	var parts []string
++	for {
++		part, err := reader.NextPart()
++		if errors.Is(err, io.EOF) {
++			return parts
++		}
++		if err != nil {
++			t.Fatal(err)
++		}
++		data, err := io.ReadAll(part)
++		if err != nil {
++			t.Fatal(err)
++		}
++		parts = append(parts, part.Header.Get("Content-Range")+"|"+string(data))
++	}
++}
++
++func TestContextConditionalStrongETagMatch(t *testing.T) {
++	const body = "0123456789"
++	recorder := context_conditionalRequest(t, 0, body, map[string]string{"ETag": `"v1"`, "Range": "bytes=2-5", "If-Range": `"v1"`})
++	if recorder.Code != http.StatusPartialContent {
++		t.Fatalf("status = %d", recorder.Code)
++	}
++	if got := recorder.Header().Get("Content-Range"); got != render.FormatContentRange(2, 4, int64(len(body))) {
++		t.Fatalf("Content-Range = %q", got)
++	}
++	if got := recorder.Header().Get("Content-Length"); got != "4" {
++		t.Fatalf("Content-Length = %q", got)
++	}
++	if got := recorder.Body.String(); got != "2345" {
++		t.Fatalf("body = %q", got)
++	}
++}
++
++func TestContextConditionalStrongETagMismatch(t *testing.T) {
++	const body = "0123456789"
++	recorder := context_conditionalRequest(t, 0, body, map[string]string{"ETag": `"v2"`, "Range": "bytes=2-5", "If-Range": `"v1"`})
++	if recorder.Code != http.StatusOK {
++		t.Fatalf("status = %d", recorder.Code)
++	}
++	if got := recorder.Header().Get("Content-Range"); got != "" {
++		t.Fatalf("Content-Range = %q", got)
++	}
++	if got := recorder.Header().Get("Content-Length"); got != "10" {
++		t.Fatalf("Content-Length = %q", got)
++	}
++	if got := recorder.Body.String(); got != body {
++		t.Fatalf("body = %q", got)
++	}
++}
++
++func TestContextConditionalDateMatchAndMismatch(t *testing.T) {
++	const body = "abcdefghij"
++	modified := time.Date(2024, time.January, 2, 3, 4, 5, 0, time.UTC).Format(http.TimeFormat)
++	matched := context_conditionalRequest(t, 0, body, map[string]string{"Last-Modified": modified, "Range": "bytes=1-3", "If-Range": modified})
++	if matched.Code != http.StatusPartialContent || matched.Header().Get("Content-Range") != "bytes 1-3/10" || matched.Body.String() != "bcd" {
++		t.Fatalf("matched response = %d %q %q", matched.Code, matched.Header().Get("Content-Range"), matched.Body.String())
++	}
++	mismatched := context_conditionalRequest(t, 0, body, map[string]string{"Last-Modified": modified, "Range": "bytes=1-3", "If-Range": time.Date(2024, time.January, 1, 3, 4, 5, 0, time.UTC).Format(http.TimeFormat)})
++	if mismatched.Code != http.StatusOK || mismatched.Header().Get("Content-Range") != "" || mismatched.Body.String() != body {
++		t.Fatalf("mismatched response = %d %q %q", mismatched.Code, mismatched.Header().Get("Content-Range"), mismatched.Body.String())
++	}
++}
++
++func TestContextConditionalWeakETagRejected(t *testing.T) {
++	const body = "0123456789"
++	recorder := context_conditionalRequest(t, 0, body, map[string]string{"ETag": `W/"v1"`, "Range": "bytes=0-2", "If-Range": `W/"v1"`})
++	if recorder.Code != http.StatusOK {
++		t.Fatalf("status = %d", recorder.Code)
++	}
++	if got := recorder.Header().Get("Content-Range"); got != "" {
++		t.Fatalf("Content-Range = %q", got)
++	}
++	if got := recorder.Body.String(); got != body {
++		t.Fatalf("body = %q", got)
++	}
++}
++
++func TestContextConditionalDefaultAndCustomMaxRanges(t *testing.T) {
++	const body = "0123456789"
++	defaultRecorder := context_conditionalRequest(t, 0, body, map[string]string{"Range": "bytes=0-0,2-2"})
++	if defaultRecorder.Code != http.StatusPartialContent {
++		t.Fatalf("default status = %d", defaultRecorder.Code)
++	}
++	defaultParts := context_conditionalParts(t, defaultRecorder)
++	if len(defaultParts) != 2 || defaultParts[0] != "bytes 0-0/10|0" || defaultParts[1] != "bytes 2-2/10|2" {
++		t.Fatalf("default parts = %#v", defaultParts)
++	}
++	customRecorder := context_conditionalRequest(t, 2, body, map[string]string{"Range": "bytes=1-1,3-3"})
++	if customRecorder.Code != http.StatusPartialContent {
++		t.Fatalf("custom status = %d", customRecorder.Code)
++	}
++	customParts := context_conditionalParts(t, customRecorder)
++	if len(customParts) != 2 || customParts[0] != "bytes 1-1/10|1" || customParts[1] != "bytes 3-3/10|3" {
++		t.Fatalf("custom parts = %#v", customParts)
++	}
++}
++
++func TestContextConditionalOverLimitFallbackAndPublicRangeAPIs(t *testing.T) {
++	const body = "0123456789"
++	ranges, err := render.ParseRange("bytes=0-0,2-2,4-4", int64(len(body)))
++	if err != nil {
++		t.Fatal(err)
++	}
++	expected := []render.Range{{Start: 0, Length: 1}, {Start: 2, Length: 1}, {Start: 4, Length: 1}}
++	if len(ranges) != len(expected) || ranges[0] != expected[0] || ranges[1] != expected[1] || ranges[2] != expected[2] {
++		t.Fatalf("ranges = %#v", ranges)
++	}
++	if _, err := render.ParseRange("bytes=20-30", int64(len(body))); !errors.Is(err, render.ErrNoOverlap) {
++		t.Fatalf("non-overlap error = %v", err)
++	}
++	recorder := context_conditionalRequest(t, 2, body, map[string]string{"Range": "bytes=0-0,2-2,4-4"})
++	if recorder.Code != http.StatusOK || recorder.Header().Get("Content-Range") != "" || recorder.Header().Get("Content-Type") != "text/plain" || recorder.Body.String() != body {
++		t.Fatalf("response = %d %q %q %q", recorder.Code, recorder.Header().Get("Content-Range"), recorder.Header().Get("Content-Type"), recorder.Body.String())
++	}
++	directory := t.TempDir()
++	if err := os.WriteFile(filepath.Join(directory, "data.txt"), []byte(body), 0o600); err != nil {
++		t.Fatal(err)
++	}
++	gin.SetMode(gin.TestMode)
++	engine := gin.New()
++	engine.MaxRanges = 1
++	engine.GET("/file", func(context *gin.Context) { context.FileFromFSRange("data.txt", os.DirFS(directory)) })
++	fileRecorder := httptest.NewRecorder()
++	fileRequest := httptest.NewRequest(http.MethodGet, "/file", nil)
++	fileRequest.Header.Set("Range", "bytes=0-0,2-2")
++	engine.ServeHTTP(fileRecorder, fileRequest)
++	if fileRecorder.Code != http.StatusOK || strings.TrimSpace(fileRecorder.Body.String()) != body {
++		t.Fatalf("file response = %d %q", fileRecorder.Code, fileRecorder.Body.String())
++	}
++	_ = render.ReaderRange{ContentType: "text/plain", ContentLength: int64(len(body)), ReadSeeker: bytes.NewReader([]byte(body)), Ranges: ranges, Boundary: "boundary", Headers: map[string]string{"ETag": `"v1"`}}
++}
+diff --git a/hiddenrange/context_core_test.go b/hiddenrange/context_core_test.go
+new file mode 100644
+index 0000000..530c717
+--- /dev/null
++++ b/hiddenrange/context_core_test.go
+@@ -0,0 +1,200 @@
++package hiddenrange_test
++
++import (
++	"bytes"
++	"errors"
++	"io"
++	"mime"
++	"mime/multipart"
++	"net/http"
++	"net/http/httptest"
++	"os"
++	"path/filepath"
++	"strings"
++	"testing"
++
++	"github.com/gin-gonic/gin"
++	"github.com/gin-gonic/gin/render"
++)
++
++func context_coreServe(t *testing.T, request *http.Request, length int64, body string, headers map[string]string) (*httptest.ResponseRecorder, bool) {
++	t.Helper()
++	recorder := httptest.NewRecorder()
++	context, _ := gin.CreateTestContext(recorder)
++	context.Request = request
++	served := context.DataFromReaderRange(http.StatusOK, length, "text/plain", bytes.NewReader([]byte(body)), headers)
++	return recorder, served
++}
++
++func TestContextCoreNoRangeParity(t *testing.T) {
++	const body = "0123456789"
++	request := httptest.NewRequest(http.MethodGet, "/data", nil)
++	recorder, served := context_coreServe(t, request, int64(len(body)), body, nil)
++	if served {
++		t.Fatal("DataFromReaderRange returned true without a partial response")
++	}
++	if recorder.Code != http.StatusOK {
++		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
++	}
++	if got := recorder.Header().Get("Content-Type"); got != "text/plain" {
++		t.Fatalf("Content-Type = %q, want %q", got, "text/plain")
++	}
++	if got := recorder.Header().Get("Content-Length"); got != "10" {
++		t.Fatalf("Content-Length = %q, want %q", got, "10")
++	}
++	if got := recorder.Body.String(); got != body {
++		t.Fatalf("body = %q, want %q", got, body)
++	}
++}
++
++func TestContextCoreAcceptRanges(t *testing.T) {
++	const body = "range capable"
++	request := httptest.NewRequest(http.MethodGet, "/data", nil)
++	recorder, _ := context_coreServe(t, request, int64(len(body)), body, nil)
++	if got := recorder.Header().Get("Accept-Ranges"); got != "bytes" {
++		t.Fatalf("Accept-Ranges = %q, want %q", got, "bytes")
++	}
++	if recorder.Code != http.StatusOK {
++		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
++	}
++	if got := recorder.Body.String(); got != body {
++		t.Fatalf("body = %q, want %q", got, body)
++	}
++}
++
++func TestContextCoreSingleOpenSuffixRanges(t *testing.T) {
++	const body = "0123456789"
++	singleRequest := httptest.NewRequest(http.MethodGet, "/data", nil)
++	singleRequest.Header.Set("Range", "bytes=2-5")
++	single, _ := context_coreServe(t, singleRequest, int64(len(body)), body, nil)
++	if single.Code != http.StatusPartialContent || single.Header().Get("Content-Range") != "bytes 2-5/10" || single.Header().Get("Content-Length") != "4" || single.Body.String() != "2345" {
++		t.Fatalf("single range response = status %d, Content-Range %q, Content-Length %q, body %q", single.Code, single.Header().Get("Content-Range"), single.Header().Get("Content-Length"), single.Body.String())
++	}
++	openRequest := httptest.NewRequest(http.MethodGet, "/data", nil)
++	openRequest.Header.Set("Range", "bytes=7-")
++	open, _ := context_coreServe(t, openRequest, int64(len(body)), body, nil)
++	if open.Code != http.StatusPartialContent || open.Header().Get("Content-Range") != "bytes 7-9/10" || open.Header().Get("Content-Length") != "3" || open.Body.String() != "789" {
++		t.Fatalf("open range response = status %d, Content-Range %q, Content-Length %q, body %q", open.Code, open.Header().Get("Content-Range"), open.Header().Get("Content-Length"), open.Body.String())
++	}
++	suffixRequest := httptest.NewRequest(http.MethodGet, "/data", nil)
++	suffixRequest.Header.Set("Range", "bytes=-3")
++	suffix, _ := context_coreServe(t, suffixRequest, int64(len(body)), body, nil)
++	if suffix.Code != http.StatusPartialContent || suffix.Header().Get("Content-Range") != "bytes 7-9/10" || suffix.Header().Get("Content-Length") != "3" || suffix.Body.String() != "789" {
++		t.Fatalf("suffix range response = status %d, Content-Range %q, Content-Length %q, body %q", suffix.Code, suffix.Header().Get("Content-Range"), suffix.Header().Get("Content-Length"), suffix.Body.String())
++	}
++	ranges, err := render.ParseRange("bytes=2-5,7-,-3", int64(len(body)))
++	if err != nil {
++		t.Fatalf("ParseRange returned error: %v", err)
++	}
++	want := []render.Range{{Start: 2, Length: 4}, {Start: 7, Length: 3}, {Start: 7, Length: 3}}
++	if len(ranges) != len(want) || ranges[0] != want[0] || ranges[1] != want[1] || ranges[2] != want[2] {
++		t.Fatalf("ParseRange = %#v, want %#v", ranges, want)
++	}
++	if got := render.FormatContentRange(2, 4, 10); got != "bytes 2-5/10" {
++		t.Fatalf("FormatContentRange = %q, want %q", got, "bytes 2-5/10")
++	}
++}
++
++func TestContextCoreUnsatisfiableRange(t *testing.T) {
++	const body = "0123456789"
++	request := httptest.NewRequest(http.MethodGet, "/data", nil)
++	request.Header.Set("Range", "bytes=20-30")
++	recorder, served := context_coreServe(t, request, int64(len(body)), body, nil)
++	if served {
++		t.Fatal("DataFromReaderRange returned true for a 416 response")
++	}
++	if recorder.Code != http.StatusRequestedRangeNotSatisfiable {
++		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusRequestedRangeNotSatisfiable)
++	}
++	if got := recorder.Header().Get("Content-Range"); got != "bytes */10" {
++		t.Fatalf("Content-Range = %q, want %q", got, "bytes */10")
++	}
++	if got := recorder.Body.String(); got != "" {
++		t.Fatalf("body = %q, want empty", got)
++	}
++	_, err := render.ParseRange("bytes=20-30", int64(len(body)))
++	if !errors.Is(err, render.ErrNoOverlap) {
++		t.Fatalf("ParseRange error = %v, want ErrNoOverlap", err)
++	}
++}
++
++func TestContextCoreReturnValueAndMultipart(t *testing.T) {
++	const body = "0123456789"
++	request := httptest.NewRequest(http.MethodGet, "/data", nil)
++	request.Header.Set("Range", "bytes=0-1,8-9")
++	recorder, served := context_coreServe(t, request, int64(len(body)), body, nil)
++	if !served {
++		t.Fatal("DataFromReaderRange returned false")
++	}
++	if recorder.Code != http.StatusPartialContent {
++		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusPartialContent)
++	}
++	mediaType, parameters, err := mime.ParseMediaType(recorder.Header().Get("Content-Type"))
++	if err != nil {
++		t.Fatalf("ParseMediaType returned error: %v", err)
++	}
++	if mediaType != "multipart/byteranges" || parameters["boundary"] == "" {
++		t.Fatalf("Content-Type = %q", recorder.Header().Get("Content-Type"))
++	}
++	reader := multipart.NewReader(bytes.NewReader(recorder.Body.Bytes()), parameters["boundary"])
++	first, err := reader.NextPart()
++	if err != nil {
++		t.Fatalf("first NextPart returned error: %v", err)
++	}
++	firstBody, err := io.ReadAll(first)
++	if err != nil {
++		t.Fatalf("reading first part: %v", err)
++	}
++	if first.Header.Get("Content-Range") != "bytes 0-1/10" || first.Header.Get("Content-Type") != "text/plain" || string(firstBody) != "01" {
++		t.Fatalf("first part = Content-Range %q, Content-Type %q, body %q", first.Header.Get("Content-Range"), first.Header.Get("Content-Type"), firstBody)
++	}
++	second, err := reader.NextPart()
++	if err != nil {
++		t.Fatalf("second NextPart returned error: %v", err)
++	}
++	secondBody, err := io.ReadAll(second)
++	if err != nil {
++		t.Fatalf("reading second part: %v", err)
++	}
++	if second.Header.Get("Content-Range") != "bytes 8-9/10" || second.Header.Get("Content-Type") != "text/plain" || string(secondBody) != "89" {
++		t.Fatalf("second part = Content-Range %q, Content-Type %q, body %q", second.Header.Get("Content-Range"), second.Header.Get("Content-Type"), secondBody)
++	}
++	if _, err := reader.NextPart(); !errors.Is(err, io.EOF) {
++		t.Fatalf("final NextPart error = %v, want EOF", err)
++	}
++}
++
++func TestContextCoreCustomHeadersAndFileFS(t *testing.T) {
++	temporaryDirectory := t.TempDir()
++	if err := os.WriteFile(filepath.Join(temporaryDirectory, "asset.txt"), []byte("abcdefghij"), 0o600); err != nil {
++		t.Fatalf("WriteFile returned error: %v", err)
++	}
++	engine := gin.New()
++	engine.MaxRanges = 4
++	engine.GET("/asset", func(context *gin.Context) {
++		context.Header("X-Route", "file")
++		context.FileFromFSRange("asset.txt", os.DirFS(temporaryDirectory))
++	})
++	request := httptest.NewRequest(http.MethodGet, "/asset", nil)
++	request.Header.Set("Range", "bytes=3-6")
++	recorder := httptest.NewRecorder()
++	engine.ServeHTTP(recorder, request)
++	if recorder.Code != http.StatusPartialContent {
++		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusPartialContent)
++	}
++	if got := recorder.Header().Get("X-Route"); got != "file" {
++		t.Fatalf("X-Route = %q, want %q", got, "file")
++	}
++	if got := recorder.Header().Get("Content-Range"); got != "bytes 3-6/10" {
++		t.Fatalf("Content-Range = %q, want %q", got, "bytes 3-6/10")
++	}
++	if got := strings.TrimSpace(recorder.Body.String()); got != "defg" {
++		t.Fatalf("body = %q, want %q", got, "defg")
++	}
++	customRequest := httptest.NewRequest(http.MethodGet, "/data", nil)
++	customRequest.Header.Set("Range", "bytes=1-2")
++	custom, _ := context_coreServe(t, customRequest, 4, "wxyz", map[string]string{"X-Custom": "present", "Cache-Control": "private"})
++	if custom.Header().Get("X-Custom") != "present" || custom.Header().Get("Cache-Control") != "private" || custom.Body.String() != "xy" {
++		t.Fatalf("custom response = X-Custom %q, Cache-Control %q, body %q", custom.Header().Get("X-Custom"), custom.Header().Get("Cache-Control"), custom.Body.String())
++	}
++}
+diff --git a/hiddenrange/file_fs_test.go b/hiddenrange/file_fs_test.go
+new file mode 100644
+index 0000000..a5459ee
+--- /dev/null
++++ b/hiddenrange/file_fs_test.go
+@@ -0,0 +1,195 @@
++package hiddenrange_test
++
++import (
++	"bytes"
++	"errors"
++	"io"
++	"mime"
++	"mime/multipart"
++	"net/http"
++	"net/http/httptest"
++	"os"
++	"path/filepath"
++	"strconv"
++	"testing"
++	"time"
++
++	"github.com/gin-gonic/gin"
++	"github.com/gin-gonic/gin/render"
++)
++
++func file_fs_create(t *testing.T, name string, content []byte, modified time.Time) string {
++	t.Helper()
++	directory := t.TempDir()
++	path := filepath.Join(directory, name)
++	if err := os.WriteFile(path, content, 0o600); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.Chtimes(path, modified, modified); err != nil {
++		t.Fatal(err)
++	}
++	return directory
++}
++
++func file_fs_serve(t *testing.T, directory, name, byteRange string, maxRanges int) *httptest.ResponseRecorder {
++	t.Helper()
++	engine := gin.New()
++	engine.MaxRanges = maxRanges
++	engine.GET("/file", func(context *gin.Context) {
++		context.FileFromFSRange(name, os.DirFS(directory))
++	})
++	request := httptest.NewRequest(http.MethodGet, "/file", nil)
++	if byteRange != "" {
++		request.Header.Set("Range", byteRange)
++	}
++	recorder := httptest.NewRecorder()
++	engine.ServeHTTP(recorder, request)
++	return recorder
++}
++
++func file_fs_equal(t *testing.T, label, got, want string) {
++	t.Helper()
++	if got != want {
++		t.Fatalf("%s = %q, want %q", label, got, want)
++	}
++}
++
++func TestFileFsSingleRange(t *testing.T) {
++	content := []byte("0123456789")
++	modified := time.Date(2020, time.January, 2, 3, 4, 5, 0, time.UTC)
++	directory := file_fs_create(t, "sample.txt", content, modified)
++	recorder := file_fs_serve(t, directory, "sample.txt", "bytes=2-5", 4)
++
++	if recorder.Code != http.StatusPartialContent {
++		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusPartialContent)
++	}
++	file_fs_equal(t, "Accept-Ranges", recorder.Header().Get("Accept-Ranges"), "bytes")
++	file_fs_equal(t, "Content-Range", recorder.Header().Get("Content-Range"), render.FormatContentRange(2, 4, int64(len(content))))
++	file_fs_equal(t, "Content-Length", recorder.Header().Get("Content-Length"), "4")
++	file_fs_equal(t, "Content-Type", recorder.Header().Get("Content-Type"), "text/plain; charset=utf-8")
++	file_fs_equal(t, "Last-Modified", recorder.Header().Get("Last-Modified"), modified.Format(http.TimeFormat))
++	file_fs_equal(t, "body", recorder.Body.String(), "2345")
++}
++
++func TestFileFsMultipleRanges(t *testing.T) {
++	content := []byte("0123456789")
++	modified := time.Date(2021, time.February, 3, 4, 5, 6, 0, time.UTC)
++	directory := file_fs_create(t, "sample.txt", content, modified)
++	recorder := file_fs_serve(t, directory, "sample.txt", "bytes=0-1,8-9", 2)
++
++	if recorder.Code != http.StatusPartialContent {
++		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusPartialContent)
++	}
++	mediaType, parameters, err := mime.ParseMediaType(recorder.Header().Get("Content-Type"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	file_fs_equal(t, "media type", mediaType, "multipart/byteranges")
++	if parameters["boundary"] == "" {
++		t.Fatal("multipart boundary is empty")
++	}
++	file_fs_equal(t, "Accept-Ranges", recorder.Header().Get("Accept-Ranges"), "bytes")
++	file_fs_equal(t, "Content-Length", recorder.Header().Get("Content-Length"), strconv.Itoa(recorder.Body.Len()))
++	file_fs_equal(t, "Last-Modified", recorder.Header().Get("Last-Modified"), modified.Format(http.TimeFormat))
++
++	reader := multipart.NewReader(bytes.NewReader(recorder.Body.Bytes()), parameters["boundary"])
++	first, err := reader.NextPart()
++	if err != nil {
++		t.Fatal(err)
++	}
++	firstBody, err := io.ReadAll(first)
++	if err != nil {
++		t.Fatal(err)
++	}
++	file_fs_equal(t, "first Content-Range", first.Header.Get("Content-Range"), render.FormatContentRange(0, 2, int64(len(content))))
++	file_fs_equal(t, "first Content-Type", first.Header.Get("Content-Type"), "text/plain; charset=utf-8")
++	file_fs_equal(t, "first body", string(firstBody), "01")
++
++	second, err := reader.NextPart()
++	if err != nil {
++		t.Fatal(err)
++	}
++	secondBody, err := io.ReadAll(second)
++	if err != nil {
++		t.Fatal(err)
++	}
++	file_fs_equal(t, "second Content-Range", second.Header.Get("Content-Range"), render.FormatContentRange(8, 2, int64(len(content))))
++	file_fs_equal(t, "second Content-Type", second.Header.Get("Content-Type"), "text/plain; charset=utf-8")
++	file_fs_equal(t, "second body", string(secondBody), "89")
++	if part, err := reader.NextPart(); part != nil || !errors.Is(err, io.EOF) {
++		t.Fatalf("final part = %v, error = %v, want nil, EOF", part, err)
++	}
++}
++
++func TestFileFsRangeNotSatisfiable(t *testing.T) {
++	content := []byte("0123456789")
++	directory := file_fs_create(t, "sample.txt", content, time.Date(2022, time.March, 4, 5, 6, 7, 0, time.UTC))
++	recorder := file_fs_serve(t, directory, "sample.txt", "bytes=20-30", 2)
++
++	if recorder.Code != http.StatusRequestedRangeNotSatisfiable {
++		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusRequestedRangeNotSatisfiable)
++	}
++	file_fs_equal(t, "Content-Range", recorder.Header().Get("Content-Range"), "bytes */10")
++	file_fs_equal(t, "body", recorder.Body.String(), "")
++	if ranges, err := render.ParseRange("bytes=20-30", int64(len(content))); ranges != nil || !errors.Is(err, render.ErrNoOverlap) {
++		t.Fatalf("ParseRange returned %#v, %v; want nil, ErrNoOverlap", ranges, err)
++	}
++}
++
++func TestFileFsMissingFile(t *testing.T) {
++	directory := t.TempDir()
++	recorder := file_fs_serve(t, directory, "missing.txt", "", 3)
++
++	if recorder.Code != http.StatusNotFound {
++		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusNotFound)
++	}
++	file_fs_equal(t, "Content-Length", recorder.Header().Get("Content-Length"), "")
++	file_fs_equal(t, "Content-Range", recorder.Header().Get("Content-Range"), "")
++	file_fs_equal(t, "Last-Modified", recorder.Header().Get("Last-Modified"), "")
++	file_fs_equal(t, "body", recorder.Body.String(), "")
++}
++
++func TestFileFsMimeType(t *testing.T) {
++	content := []byte("\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR")
++	modified := time.Date(2023, time.April, 5, 6, 7, 8, 0, time.UTC)
++	directory := file_fs_create(t, "image", content, modified)
++	recorder := file_fs_serve(t, directory, "image", "", 3)
++
++	if recorder.Code != http.StatusOK {
++		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
++	}
++	file_fs_equal(t, "Content-Type", recorder.Header().Get("Content-Type"), "application/octet-stream")
++	file_fs_equal(t, "Content-Length", recorder.Header().Get("Content-Length"), strconv.Itoa(len(content)))
++	file_fs_equal(t, "Last-Modified", recorder.Header().Get("Last-Modified"), modified.Format(http.TimeFormat))
++	if !bytes.Equal(recorder.Body.Bytes(), content) {
++		t.Fatalf("body = %q, want %q", recorder.Body.Bytes(), content)
++	}
++}
++
++func TestFileFsDataFromReaderRangeExactBytes(t *testing.T) {
++	content := []byte{0x00, 0x01, 0x02, 0x03, 0xfe, 0xff, 0x80, 0x7f}
++	engine := gin.New()
++	served := false
++	engine.GET("/data", func(context *gin.Context) {
++		served = context.DataFromReaderRange(http.StatusOK, int64(len(content)), "application/octet-stream", bytes.NewReader(content), map[string]string{"X-Exact": "yes"})
++	})
++	request := httptest.NewRequest(http.MethodGet, "/data", nil)
++	request.Header.Set("Range", "bytes=3-6")
++	recorder := httptest.NewRecorder()
++	engine.ServeHTTP(recorder, request)
++
++	if !served {
++		t.Fatal("DataFromReaderRange returned false")
++	}
++	if recorder.Code != http.StatusPartialContent {
++		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusPartialContent)
++	}
++	file_fs_equal(t, "Accept-Ranges", recorder.Header().Get("Accept-Ranges"), "bytes")
++	file_fs_equal(t, "Content-Range", recorder.Header().Get("Content-Range"), render.FormatContentRange(3, 4, int64(len(content))))
++	file_fs_equal(t, "Content-Length", recorder.Header().Get("Content-Length"), "4")
++	file_fs_equal(t, "Content-Type", recorder.Header().Get("Content-Type"), "application/octet-stream")
++	file_fs_equal(t, "X-Exact", recorder.Header().Get("X-Exact"), "yes")
++	if !bytes.Equal(recorder.Body.Bytes(), content[3:7]) {
++		t.Fatalf("body = %v, want %v", recorder.Body.Bytes(), content[3:7])
++	}
++}
+diff --git a/hiddenrange/parse_invalid_test.go b/hiddenrange/parse_invalid_test.go
+new file mode 100644
+index 0000000..8f03fa4
+--- /dev/null
++++ b/hiddenrange/parse_invalid_test.go
+@@ -0,0 +1,218 @@
++package hiddenrange_test
++
++import (
++	"bytes"
++	"errors"
++	"io"
++	"mime/multipart"
++	"net/http"
++	"net/http/httptest"
++	"os"
++	"strings"
++	"testing"
++
++	"github.com/gin-gonic/gin"
++	"github.com/gin-gonic/gin/render"
++)
++
++func TestParseInvalidMalformedPrefixAndEmptySpecs(t *testing.T) {
++	ranges, err := render.ParseRange("items=0-1", 10)
++	if err == nil || ranges != nil {
++		t.Fatalf("ParseRange malformed prefix = %#v, %v; want nil ranges and error", ranges, err)
++	}
++
++	ranges, err = render.ParseRange("Bytes=0-1", 10)
++	if err == nil || ranges != nil {
++		t.Fatalf("ParseRange case-sensitive prefix = %#v, %v; want nil ranges and error", ranges, err)
++	}
++
++	ranges, err = render.ParseRange("bytes=", 10)
++	if err == nil || ranges != nil {
++		t.Fatalf("ParseRange empty specification = %#v, %v; want nil ranges and error", ranges, err)
++	}
++
++	ranges, err = render.ParseRange("bytes=, ,", 10)
++	if err == nil || ranges != nil {
++		t.Fatalf("ParseRange empty list = %#v, %v; want nil ranges and error", ranges, err)
++	}
++}
++
++func TestParseInvalidNumbersAndInvertedRanges(t *testing.T) {
++	ranges, err := render.ParseRange("bytes=abc-1", 10)
++	if err == nil || ranges != nil {
++		t.Fatalf("ParseRange invalid start = %#v, %v; want nil ranges and error", ranges, err)
++	}
++
++	ranges, err = render.ParseRange("bytes=0-abc", 10)
++	if err == nil || ranges != nil {
++		t.Fatalf("ParseRange invalid end = %#v, %v; want nil ranges and error", ranges, err)
++	}
++
++	ranges, err = render.ParseRange("bytes=8-3", 10)
++	if err == nil || ranges != nil {
++		t.Fatalf("ParseRange inverted range = %#v, %v; want nil ranges and error", ranges, err)
++	}
++}
++
++func TestParseInvalidZeroSuffixAndNoOverlap(t *testing.T) {
++	ranges, err := render.ParseRange("bytes=-0", 10)
++	if err == nil || ranges != nil {
++		t.Fatalf("ParseRange zero suffix = %#v, %v; want nil ranges and an error", ranges, err)
++	}
++
++	ranges, err = render.ParseRange("bytes=10-20", 10)
++	if !errors.Is(err, render.ErrNoOverlap) || ranges != nil {
++		t.Fatalf("ParseRange non-overlapping range = %#v, %v; want nil ranges and ErrNoOverlap", ranges, err)
++	}
++}
++
++func TestParseInvalidZeroSizeContent(t *testing.T) {
++	ranges, err := render.ParseRange("bytes=0-0", 0)
++	if !errors.Is(err, render.ErrNoOverlap) || ranges != nil {
++		t.Fatalf("ParseRange zero-size content = %#v, %v; want nil ranges and ErrNoOverlap", ranges, err)
++	}
++	if got := render.FormatContentRange(0, 1, 1); got != "bytes 0-0/1" {
++		t.Fatalf("FormatContentRange(0, 1, 1) = %q; want %q", got, "bytes 0-0/1")
++	}
++
++	engine := gin.New()
++	engine.GET("/empty", func(context *gin.Context) {
++		served := context.DataFromReaderRange(http.StatusOK, 0, "application/octet-stream", bytes.NewReader(nil), map[string]string{"X-Test": "empty"})
++		if served {
++			t.Error("DataFromReaderRange returned true for unsatisfiable zero-size range")
++		}
++	})
++	request := httptest.NewRequest(http.MethodGet, "/empty", nil)
++	request.Header.Set("Range", "bytes=0-0")
++	recorder := httptest.NewRecorder()
++	engine.ServeHTTP(recorder, request)
++
++	if recorder.Code != http.StatusRequestedRangeNotSatisfiable {
++		t.Fatalf("status = %d; want %d", recorder.Code, http.StatusRequestedRangeNotSatisfiable)
++	}
++	if got := recorder.Header().Get("Content-Range"); got != "bytes */0" {
++		t.Fatalf("Content-Range = %q; want %q", got, "bytes */0")
++	}
++	if got := recorder.Body.String(); got != "" {
++		t.Fatalf("body = %q; want empty body", got)
++	}
++}
++
++func TestParseInvalidReaderRangeAndMaximumRanges(t *testing.T) {
++	const boundary = "parse-invalid-boundary"
++	engine := gin.New()
++	engine.GET("/multipart", func(context *gin.Context) {
++		context.Render(http.StatusPartialContent, render.ReaderRange{
++			ContentType:   "text/plain",
++			ContentLength: 6,
++			ReadSeeker:    bytes.NewReader([]byte("abcdef")),
++			Ranges: []render.Range{
++				{Start: 0, Length: 1},
++				{Start: 5, Length: 1},
++			},
++			Boundary: boundary,
++			Headers:  map[string]string{"X-Test": "multipart"},
++		})
++	})
++	request := httptest.NewRequest(http.MethodGet, "/multipart", nil)
++	recorder := httptest.NewRecorder()
++	engine.ServeHTTP(recorder, request)
++
++	if recorder.Code != http.StatusPartialContent {
++		t.Fatalf("multipart status = %d; want %d", recorder.Code, http.StatusPartialContent)
++	}
++	if got := recorder.Header().Get("Content-Type"); got != "multipart/byteranges; boundary="+boundary {
++		t.Fatalf("multipart Content-Type = %q; want %q", got, "multipart/byteranges; boundary="+boundary)
++	}
++	if got := recorder.Header().Get("X-Test"); got != "multipart" {
++		t.Fatalf("multipart X-Test = %q; want %q", got, "multipart")
++	}
++	expectedBody := "--" + boundary + "\r\nContent-Range: bytes 0-0/6\r\nContent-Type: text/plain\r\n\r\na\r\n--" + boundary + "\r\nContent-Range: bytes 5-5/6\r\nContent-Type: text/plain\r\n\r\nf\r\n--" + boundary + "--\r\n"
++	if got := recorder.Body.String(); got != expectedBody {
++		t.Fatalf("multipart body = %q; want %q", got, expectedBody)
++	}
++
++	reader := multipart.NewReader(strings.NewReader(recorder.Body.String()), boundary)
++	first, err := reader.NextPart()
++	if err != nil {
++		t.Fatalf("first multipart part: %v", err)
++	}
++	firstBody, err := io.ReadAll(first)
++	if err != nil {
++		t.Fatalf("read first multipart part: %v", err)
++	}
++	if got := first.Header.Get("Content-Range"); got != "bytes 0-0/6" || string(firstBody) != "a" {
++		t.Fatalf("first multipart part = %q, %q; want %q, %q", got, firstBody, "bytes 0-0/6", "a")
++	}
++	second, err := reader.NextPart()
++	if err != nil {
++		t.Fatalf("second multipart part: %v", err)
++	}
++	secondBody, err := io.ReadAll(second)
++	if err != nil {
++		t.Fatalf("read second multipart part: %v", err)
++	}
++	if got := second.Header.Get("Content-Range"); got != "bytes 5-5/6" || string(secondBody) != "f" {
++		t.Fatalf("second multipart part = %q, %q; want %q, %q", got, secondBody, "bytes 5-5/6", "f")
++	}
++	if _, err := reader.NextPart(); !errors.Is(err, io.EOF) {
++		t.Fatalf("multipart terminator error = %v; want EOF", err)
++	}
++
++	limited := gin.New()
++	limited.MaxRanges = 1
++	limited.GET("/limited", func(context *gin.Context) {
++		served := context.DataFromReaderRange(http.StatusOK, 6, "text/plain", bytes.NewReader([]byte("abcdef")), nil)
++		if served {
++			t.Error("DataFromReaderRange returned true when range count exceeded MaxRanges")
++		}
++	})
++	limitedRequest := httptest.NewRequest(http.MethodGet, "/limited", nil)
++	limitedRequest.Header.Set("Range", "bytes=0-0,5-5")
++	limitedRecorder := httptest.NewRecorder()
++	limited.ServeHTTP(limitedRecorder, limitedRequest)
++	if limitedRecorder.Code != http.StatusOK {
++		t.Fatalf("limited status = %d; want %d", limitedRecorder.Code, http.StatusOK)
++	}
++	if got := limitedRecorder.Header().Get("Content-Range"); got != "" {
++		t.Fatalf("limited Content-Range = %q; want empty", got)
++	}
++	if got := limitedRecorder.Body.String(); got != "abcdef" {
++		t.Fatalf("limited body = %q; want full body", got)
++	}
++}
++
++func TestParseInvalidFileFromFSRange(t *testing.T) {
++	directory := t.TempDir()
++	if err := os.WriteFile(directory+"/sample.txt", []byte("abcdef"), 0o600); err != nil {
++		t.Fatalf("WriteFile: %v", err)
++	}
++
++	engine := gin.New()
++	engine.GET("/file", func(context *gin.Context) {
++		context.FileFromFSRange("sample.txt", os.DirFS(directory))
++	})
++	request := httptest.NewRequest(http.MethodGet, "/file", nil)
++	request.Header.Set("Range", "bytes=1-3")
++	recorder := httptest.NewRecorder()
++	engine.ServeHTTP(recorder, request)
++
++	if recorder.Code != http.StatusPartialContent {
++		t.Fatalf("status = %d; want %d", recorder.Code, http.StatusPartialContent)
++	}
++	if got := recorder.Header().Get("Content-Range"); got != "bytes 1-3/6" {
++		t.Fatalf("Content-Range = %q; want %q", got, "bytes 1-3/6")
++	}
++	if got := recorder.Header().Get("Content-Length"); got != "3" {
++		t.Fatalf("Content-Length = %q; want %q", got, "3")
++	}
++	if got := recorder.Header().Get("Content-Type"); got != "text/plain; charset=utf-8" {
++		t.Fatalf("Content-Type = %q; want %q", got, "text/plain; charset=utf-8")
++	}
++	if got := recorder.Header().Get("Accept-Ranges"); got != "bytes" {
++		t.Fatalf("Accept-Ranges = %q; want %q", got, "bytes")
++	}
++	if got := recorder.Body.String(); got != "bcd" {
++		t.Fatalf("body = %q; want %q", got, "bcd")
++	}
++}
+diff --git a/hiddenrange/parse_valid_test.go b/hiddenrange/parse_valid_test.go
+new file mode 100644
+index 0000000..9648bed
+--- /dev/null
++++ b/hiddenrange/parse_valid_test.go
+@@ -0,0 +1,319 @@
++package hiddenrange_test
++
++import (
++	"bytes"
++	"errors"
++	"io"
++	"mime"
++	"mime/multipart"
++	"net/http"
++	"net/http/httptest"
++	"os"
++	"testing"
++
++	"github.com/gin-gonic/gin"
++	"github.com/gin-gonic/gin/render"
++)
++
++func TestParseValidStartEnd(t *testing.T) {
++	ranges, err := render.ParseRange("bytes=2-5", 10)
++	if err != nil {
++		t.Fatalf("ParseRange returned error: %v", err)
++	}
++	if len(ranges) != 1 || ranges[0].Start != 2 || ranges[0].Length != 4 {
++		t.Fatalf("ParseRange returned %#v, want start 2 and length 4", ranges)
++	}
++
++	engine := gin.New()
++	served := false
++	engine.GET("/", func(context *gin.Context) {
++		served = context.DataFromReaderRange(http.StatusOK, 10, "text/plain", bytes.NewReader([]byte("0123456789")), map[string]string{"X-Range-Test": "start-end"})
++	})
++
++	request := httptest.NewRequest(http.MethodGet, "/", nil)
++	request.Header.Set("Range", "bytes=2-5")
++	response := httptest.NewRecorder()
++	engine.ServeHTTP(response, request)
++
++	if !served {
++		t.Fatal("DataFromReaderRange returned false for a valid range")
++	}
++	if response.Code != http.StatusPartialContent {
++		t.Fatalf("status = %d, want %d", response.Code, http.StatusPartialContent)
++	}
++	if value := response.Header().Get("Content-Range"); value != "bytes 2-5/10" {
++		t.Fatalf("Content-Range = %q, want %q", value, "bytes 2-5/10")
++	}
++	if value := response.Header().Get("Content-Length"); value != "4" {
++		t.Fatalf("Content-Length = %q, want %q", value, "4")
++	}
++	if value := response.Header().Get("Content-Type"); value != "text/plain" {
++		t.Fatalf("Content-Type = %q, want %q", value, "text/plain")
++	}
++	if value := response.Header().Get("X-Range-Test"); value != "start-end" {
++		t.Fatalf("X-Range-Test = %q, want %q", value, "start-end")
++	}
++	if body := response.Body.String(); body != "2345" {
++		t.Fatalf("body = %q, want %q", body, "2345")
++	}
++}
++
++func TestParseValidOpenEnded(t *testing.T) {
++	ranges, err := render.ParseRange("bytes=6-", 10)
++	if err != nil {
++		t.Fatalf("ParseRange returned error: %v", err)
++	}
++	if len(ranges) != 1 || ranges[0].Start != 6 || ranges[0].Length != 4 {
++		t.Fatalf("ParseRange returned %#v, want start 6 and length 4", ranges)
++	}
++
++	engine := gin.New()
++	engine.GET("/", func(context *gin.Context) {
++		context.Render(http.StatusPartialContent, render.ReaderRange{
++			ContentType:   "application/octet-stream",
++			ContentLength: 10,
++			ReadSeeker:    bytes.NewReader([]byte("0123456789")),
++			Ranges:        ranges,
++			Boundary:      "parse-valid-unused",
++			Headers:       map[string]string{"X-Range-Test": "open-ended"},
++		})
++	})
++
++	request := httptest.NewRequest(http.MethodGet, "/", nil)
++	response := httptest.NewRecorder()
++	engine.ServeHTTP(response, request)
++
++	if response.Code != http.StatusPartialContent {
++		t.Fatalf("status = %d, want %d", response.Code, http.StatusPartialContent)
++	}
++	if value := response.Header().Get("Content-Range"); value != "bytes 6-9/10" {
++		t.Fatalf("Content-Range = %q, want %q", value, "bytes 6-9/10")
++	}
++	if value := response.Header().Get("Content-Length"); value != "4" {
++		t.Fatalf("Content-Length = %q, want %q", value, "4")
++	}
++	if value := response.Header().Get("Content-Type"); value != "application/octet-stream" {
++		t.Fatalf("Content-Type = %q, want %q", value, "application/octet-stream")
++	}
++	if value := response.Header().Get("X-Range-Test"); value != "open-ended" {
++		t.Fatalf("X-Range-Test = %q, want %q", value, "open-ended")
++	}
++	if body := response.Body.String(); body != "6789" {
++		t.Fatalf("body = %q, want %q", body, "6789")
++	}
++}
++
++func TestParseValidSuffix(t *testing.T) {
++	ranges, err := render.ParseRange("bytes=-3", 10)
++	if err != nil {
++		t.Fatalf("ParseRange returned error: %v", err)
++	}
++	if len(ranges) != 1 || ranges[0].Start != 7 || ranges[0].Length != 3 {
++		t.Fatalf("ParseRange returned %#v, want start 7 and length 3", ranges)
++	}
++
++	directory := t.TempDir()
++	if err := os.WriteFile(directory+"/sample.txt", []byte("0123456789"), 0o600); err != nil {
++		t.Fatalf("WriteFile returned error: %v", err)
++	}
++
++	engine := gin.New()
++	engine.GET("/", func(context *gin.Context) {
++		context.FileFromFSRange("sample.txt", os.DirFS(directory))
++	})
++
++	request := httptest.NewRequest(http.MethodGet, "/", nil)
++	request.Header.Set("Range", "bytes=-3")
++	response := httptest.NewRecorder()
++	engine.ServeHTTP(response, request)
++
++	if response.Code != http.StatusPartialContent {
++		t.Fatalf("status = %d, want %d", response.Code, http.StatusPartialContent)
++	}
++	if value := response.Header().Get("Content-Range"); value != "bytes 7-9/10" {
++		t.Fatalf("Content-Range = %q, want %q", value, "bytes 7-9/10")
++	}
++	if value := response.Header().Get("Content-Length"); value != "3" {
++		t.Fatalf("Content-Length = %q, want %q", value, "3")
++	}
++	if value := response.Header().Get("Content-Type"); value != "text/plain; charset=utf-8" {
++		t.Fatalf("Content-Type = %q, want %q", value, "text/plain; charset=utf-8")
++	}
++	if value := response.Header().Get("Accept-Ranges"); value != "bytes" {
++		t.Fatalf("Accept-Ranges = %q, want %q", value, "bytes")
++	}
++	if body := response.Body.String(); body != "789" {
++		t.Fatalf("body = %q, want %q", body, "789")
++	}
++}
++
++func TestParseValidClamping(t *testing.T) {
++	ranges, err := render.ParseRange("bytes=7-99", 10)
++	if err != nil {
++		t.Fatalf("ParseRange returned error: %v", err)
++	}
++	if len(ranges) != 1 || ranges[0].Start != 7 || ranges[0].Length != 3 {
++		t.Fatalf("ParseRange returned %#v, want start 7 and length 3", ranges)
++	}
++
++	engine := gin.New()
++	served := false
++	engine.GET("/", func(context *gin.Context) {
++		served = context.DataFromReaderRange(http.StatusOK, 10, "application/octet-stream", bytes.NewReader([]byte("0123456789")), nil)
++	})
++
++	request := httptest.NewRequest(http.MethodGet, "/", nil)
++	request.Header.Set("Range", "bytes=7-99")
++	response := httptest.NewRecorder()
++	engine.ServeHTTP(response, request)
++
++	if !served {
++		t.Fatal("DataFromReaderRange returned false for a clamped range")
++	}
++	if response.Code != http.StatusPartialContent {
++		t.Fatalf("status = %d, want %d", response.Code, http.StatusPartialContent)
++	}
++	if value := response.Header().Get("Content-Range"); value != "bytes 7-9/10" {
++		t.Fatalf("Content-Range = %q, want %q", value, "bytes 7-9/10")
++	}
++	if value := response.Header().Get("Content-Length"); value != "3" {
++		t.Fatalf("Content-Length = %q, want %q", value, "3")
++	}
++	if value := response.Header().Get("Content-Type"); value != "application/octet-stream" {
++		t.Fatalf("Content-Type = %q, want %q", value, "application/octet-stream")
++	}
++	if value := response.Header().Get("Accept-Ranges"); value != "bytes" {
++		t.Fatalf("Accept-Ranges = %q, want %q", value, "bytes")
++	}
++	if body := response.Body.String(); body != "789" {
++		t.Fatalf("body = %q, want %q", body, "789")
++	}
++}
++
++func TestParseValidMixedSatisfiableAndOutOfWindow(t *testing.T) {
++	ranges, err := render.ParseRange("bytes=0-1,20-30,8-20", 10)
++	if err != nil {
++		t.Fatalf("ParseRange returned error: %v", err)
++	}
++	if len(ranges) != 2 {
++		t.Fatalf("ParseRange returned %d ranges, want 2: %#v", len(ranges), ranges)
++	}
++	if ranges[0].Start != 0 || ranges[0].Length != 2 {
++		t.Fatalf("first range = %#v, want start 0 and length 2", ranges[0])
++	}
++	if ranges[1].Start != 8 || ranges[1].Length != 2 {
++		t.Fatalf("second range = %#v, want start 8 and length 2", ranges[1])
++	}
++
++	engine := gin.New()
++	engine.MaxRanges = 3
++	served := false
++	engine.GET("/", func(context *gin.Context) {
++		served = context.DataFromReaderRange(http.StatusOK, 10, "application/octet-stream", bytes.NewReader([]byte("0123456789")), nil)
++	})
++
++	request := httptest.NewRequest(http.MethodGet, "/", nil)
++	request.Header.Set("Range", "bytes=0-1,20-30,8-20")
++	response := httptest.NewRecorder()
++	engine.ServeHTTP(response, request)
++
++	if !served {
++		t.Fatal("DataFromReaderRange returned false for two satisfiable ranges")
++	}
++	if response.Code != http.StatusPartialContent {
++		t.Fatalf("status = %d, want %d", response.Code, http.StatusPartialContent)
++	}
++	if value := response.Header().Get("Accept-Ranges"); value != "bytes" {
++		t.Fatalf("Accept-Ranges = %q, want %q", value, "bytes")
++	}
++	mediaType, parameters, err := mime.ParseMediaType(response.Header().Get("Content-Type"))
++	if err != nil {
++		t.Fatalf("ParseMediaType returned error: %v", err)
++	}
++	if mediaType != "multipart/byteranges" {
++		t.Fatalf("media type = %q, want %q", mediaType, "multipart/byteranges")
++	}
++	if parameters["boundary"] == "" {
++		t.Fatal("multipart boundary is empty")
++	}
++
++	multipartReader := multipart.NewReader(bytes.NewReader(response.Body.Bytes()), parameters["boundary"])
++	firstPart, err := multipartReader.NextPart()
++	if err != nil {
++		t.Fatalf("reading first part returned error: %v", err)
++	}
++	if value := firstPart.Header.Get("Content-Range"); value != "bytes 0-1/10" {
++		t.Fatalf("first Content-Range = %q, want %q", value, "bytes 0-1/10")
++	}
++	if value := firstPart.Header.Get("Content-Type"); value != "application/octet-stream" {
++		t.Fatalf("first Content-Type = %q, want %q", value, "application/octet-stream")
++	}
++	firstBody, err := io.ReadAll(firstPart)
++	if err != nil {
++		t.Fatalf("reading first body returned error: %v", err)
++	}
++	if string(firstBody) != "01" {
++		t.Fatalf("first body = %q, want %q", firstBody, "01")
++	}
++
++	secondPart, err := multipartReader.NextPart()
++	if err != nil {
++		t.Fatalf("reading second part returned error: %v", err)
++	}
++	if value := secondPart.Header.Get("Content-Range"); value != "bytes 8-9/10" {
++		t.Fatalf("second Content-Range = %q, want %q", value, "bytes 8-9/10")
++	}
++	if value := secondPart.Header.Get("Content-Type"); value != "application/octet-stream" {
++		t.Fatalf("second Content-Type = %q, want %q", value, "application/octet-stream")
++	}
++	secondBody, err := io.ReadAll(secondPart)
++	if err != nil {
++		t.Fatalf("reading second body returned error: %v", err)
++	}
++	if string(secondBody) != "89" {
++		t.Fatalf("second body = %q, want %q", secondBody, "89")
++	}
++
++	thirdPart, err := multipartReader.NextPart()
++	if thirdPart != nil || !errors.Is(err, io.EOF) {
++		t.Fatalf("reading third part returned part %#v and error %v, want EOF", thirdPart, err)
++	}
++}
++
++func TestParseValidFormatContentRange(t *testing.T) {
++	if value := render.FormatContentRange(2, 5, 10); value != "bytes 2-6/10" {
++		t.Fatalf("FormatContentRange = %q, want %q", value, "bytes 2-6/10")
++	}
++	if value := render.FormatContentRange(9, 1, 10); value != "bytes 9-9/10" {
++		t.Fatalf("last-byte FormatContentRange = %q, want %q", value, "bytes 9-9/10")
++	}
++
++	_, err := render.ParseRange("bytes=20-30", 10)
++	if !errors.Is(err, render.ErrNoOverlap) {
++		t.Fatalf("ParseRange error = %v, want ErrNoOverlap", err)
++	}
++
++	engine := gin.New()
++	served := true
++	engine.GET("/", func(context *gin.Context) {
++		served = context.DataFromReaderRange(http.StatusOK, 10, "text/plain", bytes.NewReader([]byte("0123456789")), nil)
++	})
++
++	request := httptest.NewRequest(http.MethodGet, "/", nil)
++	request.Header.Set("Range", "bytes=20-30")
++	response := httptest.NewRecorder()
++	engine.ServeHTTP(response, request)
++
++	if served {
++		t.Fatal("DataFromReaderRange returned true for an out-of-window range")
++	}
++	if response.Code != http.StatusRequestedRangeNotSatisfiable {
++		t.Fatalf("status = %d, want %d", response.Code, http.StatusRequestedRangeNotSatisfiable)
++	}
++	if value := response.Header().Get("Content-Range"); value != "bytes */10" {
++		t.Fatalf("Content-Range = %q, want %q", value, "bytes */10")
++	}
++	if body := response.Body.String(); body != "" {
++		t.Fatalf("body = %q, want empty body", body)
++	}
++}
+diff --git a/hiddenrange/reader_multi_test.go b/hiddenrange/reader_multi_test.go
+new file mode 100644
+index 0000000..4acc039
+--- /dev/null
++++ b/hiddenrange/reader_multi_test.go
+@@ -0,0 +1,237 @@
++package hiddenrange_test
++
++import (
++	"bytes"
++	"errors"
++	"io"
++	"mime"
++	"mime/multipart"
++	"net/http"
++	"net/http/httptest"
++	"net/textproto"
++	"os"
++	"path/filepath"
++	"reflect"
++	"strconv"
++	"testing"
++
++	"github.com/gin-gonic/gin"
++	"github.com/gin-gonic/gin/render"
++)
++
++func TestReaderMultiParseRangeOrderingAndNoOverlap(t *testing.T) {
++	ranges, err := render.ParseRange("bytes=6-7,0-1,-2", 10)
++	if err != nil {
++		t.Fatalf("ParseRange returned error: %v", err)
++	}
++	want := []render.Range{{Start: 6, Length: 2}, {Start: 0, Length: 2}, {Start: 8, Length: 2}}
++	if !reflect.DeepEqual(ranges, want) {
++		t.Fatalf("ranges = %#v, want %#v", ranges, want)
++	}
++	if got := render.FormatContentRange(ranges[0].Start, ranges[0].Length, 10); got != "bytes 6-7/10" {
++		t.Fatalf("FormatContentRange = %q, want %q", got, "bytes 6-7/10")
++	}
++	_, err = render.ParseRange("bytes=20-30", 10)
++	if !errors.Is(err, render.ErrNoOverlap) {
++		t.Fatalf("ParseRange error = %v, want ErrNoOverlap", err)
++	}
++}
++
++func TestReaderMultiRenderExactMultipart(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++	recorder := httptest.NewRecorder()
++	context, _ := gin.CreateTestContext(recorder)
++	context.Request = httptest.NewRequest(http.MethodGet, "/", nil)
++	context.Render(http.StatusPartialContent, render.ReaderRange{
++		ContentType:   "text/plain",
++		ContentLength: 10,
++		ReadSeeker:    bytes.NewReader([]byte("0123456789")),
++		Ranges:        []render.Range{{Start: 0, Length: 2}, {Start: 7, Length: 3}},
++		Boundary:      "reader-multi-boundary",
++		Headers:       map[string]string{"X-Scope": "exact"},
++	})
++
++	wantBody := "--reader-multi-boundary\r\nContent-Range: bytes 0-1/10\r\nContent-Type: text/plain\r\n\r\n01\r\n--reader-multi-boundary\r\nContent-Range: bytes 7-9/10\r\nContent-Type: text/plain\r\n\r\n789\r\n--reader-multi-boundary--\r\n"
++	if recorder.Code != http.StatusPartialContent {
++		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusPartialContent)
++	}
++	if got := recorder.Header().Get("Content-Type"); got != "multipart/byteranges; boundary=reader-multi-boundary" {
++		t.Fatalf("Content-Type = %q", got)
++	}
++	if got := recorder.Header().Get("Content-Length"); got != strconv.Itoa(len(wantBody)) {
++		t.Fatalf("Content-Length = %q, want %d", got, len(wantBody))
++	}
++	if got := recorder.Header().Get("X-Scope"); got != "exact" {
++		t.Fatalf("X-Scope = %q, want exact", got)
++	}
++	if got := recorder.Body.String(); got != wantBody {
++		t.Fatalf("body = %q, want %q", got, wantBody)
++	}
++}
++
++func TestReaderMultiMIMEPartHeadersAndOrdering(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++	recorder := httptest.NewRecorder()
++	context, _ := gin.CreateTestContext(recorder)
++	context.Request = httptest.NewRequest(http.MethodGet, "/", nil)
++	context.Render(http.StatusPartialContent, render.ReaderRange{
++		ContentType:   "application/octet-stream",
++		ContentLength: 10,
++		ReadSeeker:    bytes.NewReader([]byte("abcdefghij")),
++		Ranges:        []render.Range{{Start: 4, Length: 3}, {Start: 0, Length: 2}},
++		Boundary:      "reader-mime-boundary",
++	})
++
++	wantBody := "--reader-mime-boundary\r\nContent-Range: bytes 4-6/10\r\nContent-Type: application/octet-stream\r\n\r\nefg\r\n--reader-mime-boundary\r\nContent-Range: bytes 0-1/10\r\nContent-Type: application/octet-stream\r\n\r\nab\r\n--reader-mime-boundary--\r\n"
++	if recorder.Code != http.StatusPartialContent {
++		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusPartialContent)
++	}
++	if recorder.Body.String() != wantBody {
++		t.Fatalf("body = %q, want %q", recorder.Body.String(), wantBody)
++	}
++	if got := recorder.Header().Get("Content-Length"); got != strconv.Itoa(len(wantBody)) {
++		t.Fatalf("Content-Length = %q, want %d", got, len(wantBody))
++	}
++
++	mediaType, parameters, err := mime.ParseMediaType(recorder.Header().Get("Content-Type"))
++	if err != nil {
++		t.Fatalf("ParseMediaType returned error: %v", err)
++	}
++	if mediaType != "multipart/byteranges" || parameters["boundary"] != "reader-mime-boundary" {
++		t.Fatalf("media type = %q, parameters = %#v", mediaType, parameters)
++	}
++	reader := multipart.NewReader(bytes.NewReader(recorder.Body.Bytes()), parameters["boundary"])
++	first, err := reader.NextPart()
++	if err != nil {
++		t.Fatalf("first NextPart returned error: %v", err)
++	}
++	firstHeaders := textproto.MIMEHeader{"Content-Range": {"bytes 4-6/10"}, "Content-Type": {"application/octet-stream"}}
++	if !reflect.DeepEqual(first.Header, firstHeaders) {
++		t.Fatalf("first headers = %#v, want %#v", first.Header, firstHeaders)
++	}
++	firstPayload, err := io.ReadAll(first)
++	if err != nil || string(firstPayload) != "efg" {
++		t.Fatalf("first payload = %q, error = %v", firstPayload, err)
++	}
++	second, err := reader.NextPart()
++	if err != nil {
++		t.Fatalf("second NextPart returned error: %v", err)
++	}
++	secondHeaders := textproto.MIMEHeader{"Content-Range": {"bytes 0-1/10"}, "Content-Type": {"application/octet-stream"}}
++	if !reflect.DeepEqual(second.Header, secondHeaders) {
++		t.Fatalf("second headers = %#v, want %#v", second.Header, secondHeaders)
++	}
++	secondPayload, err := io.ReadAll(second)
++	if err != nil || string(secondPayload) != "ab" {
++		t.Fatalf("second payload = %q, error = %v", secondPayload, err)
++	}
++	_, err = reader.NextPart()
++	if !errors.Is(err, io.EOF) {
++		t.Fatalf("final NextPart error = %v, want EOF", err)
++	}
++}
++
++func TestReaderMultiContextDataFromReaderRange(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++	recorder := httptest.NewRecorder()
++	context, _ := gin.CreateTestContext(recorder)
++	context.Request = httptest.NewRequest(http.MethodGet, "/data", nil)
++	context.Request.Header.Set("Range", "bytes=2-3,8-9")
++	handled := context.DataFromReaderRange(http.StatusOK, 10, "application/octet-stream", bytes.NewReader([]byte("abcdefghij")), map[string]string{"X-Context": "range"})
++	if !handled {
++		t.Fatal("DataFromReaderRange returned false for a valid range")
++	}
++	if recorder.Code != http.StatusPartialContent {
++		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusPartialContent)
++	}
++	mediaType, parameters, err := mime.ParseMediaType(recorder.Header().Get("Content-Type"))
++	if err != nil {
++		t.Fatalf("ParseMediaType returned error: %v", err)
++	}
++	if mediaType != "multipart/byteranges" || parameters["boundary"] == "" {
++		t.Fatalf("media type = %q, parameters = %#v", mediaType, parameters)
++	}
++	boundary := parameters["boundary"]
++	wantBody := "--" + boundary + "\r\nContent-Range: bytes 2-3/10\r\nContent-Type: application/octet-stream\r\n\r\ncd\r\n--" + boundary + "\r\nContent-Range: bytes 8-9/10\r\nContent-Type: application/octet-stream\r\n\r\nij\r\n--" + boundary + "--\r\n"
++	if got := recorder.Body.String(); got != wantBody {
++		t.Fatalf("body = %q, want %q", got, wantBody)
++	}
++	if got := recorder.Header().Get("Content-Length"); got != strconv.Itoa(len(wantBody)) {
++		t.Fatalf("Content-Length = %q, want %d", got, len(wantBody))
++	}
++	if got := recorder.Header().Get("X-Context"); got != "range" {
++		t.Fatalf("X-Context = %q, want range", got)
++	}
++}
++
++func TestReaderMultiContextUnsatisfiedRange(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++	recorder := httptest.NewRecorder()
++	context, _ := gin.CreateTestContext(recorder)
++	context.Request = httptest.NewRequest(http.MethodGet, "/data", nil)
++	context.Request.Header.Set("Range", "bytes=99-100")
++	handled := context.DataFromReaderRange(http.StatusOK, 10, "text/plain", bytes.NewReader([]byte("0123456789")), nil)
++	if handled {
++		t.Fatal("DataFromReaderRange returned true for an unsatisfied range request")
++	}
++	if recorder.Code != http.StatusRequestedRangeNotSatisfiable {
++		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusRequestedRangeNotSatisfiable)
++	}
++	if got := recorder.Header().Get("Content-Range"); got != "bytes */10" {
++		t.Fatalf("Content-Range = %q, want %q", got, "bytes */10")
++	}
++	if got := recorder.Body.String(); got != "" {
++		t.Fatalf("body = %q, want empty", got)
++	}
++}
++
++func TestReaderMultiFileFromFSRangeAndMaxRanges(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++	directory := t.TempDir()
++	if err := os.WriteFile(filepath.Join(directory, "asset.txt"), []byte("0123456789"), 0o600); err != nil {
++		t.Fatalf("WriteFile returned error: %v", err)
++	}
++	engine := gin.New()
++	engine.MaxRanges = 2
++	engine.GET("/asset", func(context *gin.Context) {
++		context.FileFromFSRange("asset.txt", os.DirFS(directory))
++	})
++
++	success := httptest.NewRecorder()
++	successRequest := httptest.NewRequest(http.MethodGet, "/asset", nil)
++	successRequest.Header.Set("Range", "bytes=1-2,7-8")
++	engine.ServeHTTP(success, successRequest)
++	if success.Code != http.StatusPartialContent {
++		t.Fatalf("status = %d, want %d", success.Code, http.StatusPartialContent)
++	}
++	mediaType, parameters, err := mime.ParseMediaType(success.Header().Get("Content-Type"))
++	if err != nil {
++		t.Fatalf("ParseMediaType returned error: %v", err)
++	}
++	if mediaType != "multipart/byteranges" || parameters["boundary"] == "" {
++		t.Fatalf("media type = %q, parameters = %#v", mediaType, parameters)
++	}
++	boundary := parameters["boundary"]
++	wantBody := "--" + boundary + "\r\nContent-Range: bytes 1-2/10\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n12\r\n--" + boundary + "\r\nContent-Range: bytes 7-8/10\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n78\r\n--" + boundary + "--\r\n"
++	if got := success.Body.String(); got != wantBody {
++		t.Fatalf("body = %q, want %q", got, wantBody)
++	}
++	if got := success.Header().Get("Content-Length"); got != strconv.Itoa(len(wantBody)) {
++		t.Fatalf("Content-Length = %q, want %d", got, len(wantBody))
++	}
++
++	engine.MaxRanges = 1
++	rejected := httptest.NewRecorder()
++	rejectedRequest := httptest.NewRequest(http.MethodGet, "/asset", nil)
++	rejectedRequest.Header.Set("Range", "bytes=1-2,7-8")
++	engine.ServeHTTP(rejected, rejectedRequest)
++	if rejected.Code != http.StatusOK {
++		t.Fatalf("limited status = %d, want %d", rejected.Code, http.StatusOK)
++	}
++	if got := rejected.Header().Get("Content-Range"); got != "" {
++		t.Fatalf("limited Content-Range = %q, want empty", got)
++	}
++	if got := rejected.Body.String(); got != "0123456789" {
++		t.Fatalf("limited body = %q, want full body", got)
++	}
++}
+diff --git a/hiddenrange/reader_single_test.go b/hiddenrange/reader_single_test.go
+new file mode 100644
+index 0000000..c900727
+--- /dev/null
++++ b/hiddenrange/reader_single_test.go
+@@ -0,0 +1,227 @@
++package hiddenrange_test
++
++import (
++	"bytes"
++	"errors"
++	"net/http"
++	"net/http/httptest"
++	"os"
++	"path/filepath"
++	"testing"
++
++	"github.com/gin-gonic/gin"
++	"github.com/gin-gonic/gin/render"
++)
++
++func TestReaderSingleRangeStatus(t *testing.T) {
++	engine := gin.New()
++	payload := []byte("0123456789")
++	var rendered bool
++	engine.GET("/data", func(context *gin.Context) {
++		rendered = context.DataFromReaderRange(http.StatusCreated, int64(len(payload)), "text/plain", bytes.NewReader(payload), nil)
++	})
++
++	request := httptest.NewRequest(http.MethodGet, "/data", nil)
++	request.Header.Set("Range", "bytes=2-5")
++	response := httptest.NewRecorder()
++	engine.ServeHTTP(response, request)
++
++	if !rendered {
++		t.Fatal("DataFromReaderRange returned false for a valid single range")
++	}
++	if response.Code != http.StatusPartialContent {
++		t.Fatalf("status = %d, want %d", response.Code, http.StatusPartialContent)
++	}
++	if response.Body.String() != "2345" {
++		t.Fatalf("body = %q, want %q", response.Body.String(), "2345")
++	}
++}
++
++func TestReaderSingleRangeHeaders(t *testing.T) {
++	engine := gin.New()
++	payload := []byte("abcdefghij")
++	engine.GET("/data", func(context *gin.Context) {
++		context.DataFromReaderRange(http.StatusOK, int64(len(payload)), "application/octet-stream", bytes.NewReader(payload), nil)
++	})
++
++	request := httptest.NewRequest(http.MethodGet, "/data", nil)
++	request.Header.Set("Range", "bytes=3-6")
++	response := httptest.NewRecorder()
++	engine.ServeHTTP(response, request)
++
++	if response.Code != http.StatusPartialContent {
++		t.Fatalf("status = %d, want %d", response.Code, http.StatusPartialContent)
++	}
++	if value := response.Header().Get("Accept-Ranges"); value != "bytes" {
++		t.Fatalf("Accept-Ranges = %q, want %q", value, "bytes")
++	}
++	if value := response.Header().Get("Content-Range"); value != "bytes 3-6/10" {
++		t.Fatalf("Content-Range = %q, want %q", value, "bytes 3-6/10")
++	}
++	if value := response.Header().Get("Content-Length"); value != "4" {
++		t.Fatalf("Content-Length = %q, want %q", value, "4")
++	}
++	if value := response.Header().Get("Content-Type"); value != "application/octet-stream" {
++		t.Fatalf("Content-Type = %q, want %q", value, "application/octet-stream")
++	}
++	if response.Body.String() != "defg" {
++		t.Fatalf("body = %q, want %q", response.Body.String(), "defg")
++	}
++}
++
++func TestReaderSingleRangeExactFileBytes(t *testing.T) {
++	directory := t.TempDir()
++	payload := []byte{0x00, 0x01, 0x7f, 0x80, 0xfe, 0xff}
++	if err := os.WriteFile(filepath.Join(directory, "payload.bin"), payload, 0o600); err != nil {
++		t.Fatalf("WriteFile: %v", err)
++	}
++
++	engine := gin.New()
++	engine.GET("/file", func(context *gin.Context) {
++		context.FileFromFSRange("payload.bin", os.DirFS(directory))
++	})
++
++	request := httptest.NewRequest(http.MethodGet, "/file", nil)
++	request.Header.Set("Range", "bytes=2-4")
++	response := httptest.NewRecorder()
++	engine.ServeHTTP(response, request)
++
++	if response.Code != http.StatusPartialContent {
++		t.Fatalf("status = %d, want %d", response.Code, http.StatusPartialContent)
++	}
++	if value := response.Header().Get("Content-Range"); value != "bytes 2-4/6" {
++		t.Fatalf("Content-Range = %q, want %q", value, "bytes 2-4/6")
++	}
++	if value := response.Header().Get("Content-Length"); value != "3" {
++		t.Fatalf("Content-Length = %q, want %q", value, "3")
++	}
++	if !bytes.Equal(response.Body.Bytes(), []byte{0x7f, 0x80, 0xfe}) {
++		t.Fatalf("body = %v, want %v", response.Body.Bytes(), []byte{0x7f, 0x80, 0xfe})
++	}
++}
++
++func TestReaderSingleRangeCustomHeaders(t *testing.T) {
++	payload := []byte("reader-range")
++	response := httptest.NewRecorder()
++	readerRange := render.ReaderRange{
++		ContentType:   "text/custom",
++		ContentLength: int64(len(payload)),
++		ReadSeeker:    bytes.NewReader(payload),
++		Ranges:        []render.Range{{Start: 1, Length: 6}},
++		Boundary:      "reader-single-boundary",
++		Headers: map[string]string{
++			"Cache-Control": "private, max-age=0",
++			"X-Reader-Test": "single",
++		},
++	}
++
++	if err := readerRange.Render(response); err != nil {
++		t.Fatalf("Render: %v", err)
++	}
++	if value := response.Header().Get("Cache-Control"); value != "private, max-age=0" {
++		t.Fatalf("Cache-Control = %q, want %q", value, "private, max-age=0")
++	}
++	if value := response.Header().Get("X-Reader-Test"); value != "single" {
++		t.Fatalf("X-Reader-Test = %q, want %q", value, "single")
++	}
++	if value := response.Header().Get("Content-Type"); value != "text/custom" {
++		t.Fatalf("Content-Type = %q, want %q", value, "text/custom")
++	}
++	if value := response.Header().Get("Content-Range"); value != "bytes 1-6/12" {
++		t.Fatalf("Content-Range = %q, want %q", value, "bytes 1-6/12")
++	}
++	if value := response.Header().Get("Content-Length"); value != "6" {
++		t.Fatalf("Content-Length = %q, want %q", value, "6")
++	}
++	if response.Body.String() != "eader-" {
++		t.Fatalf("body = %q, want %q", response.Body.String(), "eader-")
++	}
++}
++
++func TestReaderSingleRangeBoundaryConditions(t *testing.T) {
++	suffixRanges, err := render.ParseRange("bytes=-2", 5)
++	if err != nil {
++		t.Fatalf("ParseRange suffix: %v", err)
++	}
++	if len(suffixRanges) != 1 || suffixRanges[0].Start != 3 || suffixRanges[0].Length != 2 {
++		t.Fatalf("suffix range = %#v, want start 3 length 2", suffixRanges)
++	}
++
++	endRanges, err := render.ParseRange("bytes=4-", 5)
++	if err != nil {
++		t.Fatalf("ParseRange open end: %v", err)
++	}
++	if len(endRanges) != 1 || endRanges[0].Start != 4 || endRanges[0].Length != 1 {
++		t.Fatalf("open-ended range = %#v, want start 4 length 1", endRanges)
++	}
++
++	if value := render.FormatContentRange(4, 1, 5); value != "bytes 4-4/5" {
++		t.Fatalf("FormatContentRange = %q, want %q", value, "bytes 4-4/5")
++	}
++
++	engine := gin.New()
++	payload := []byte("abcde")
++	engine.GET("/last", func(context *gin.Context) {
++		context.DataFromReaderRange(http.StatusOK, int64(len(payload)), "text/plain", bytes.NewReader(payload), nil)
++	})
++	request := httptest.NewRequest(http.MethodGet, "/last", nil)
++	request.Header.Set("Range", "bytes=4-4")
++	response := httptest.NewRecorder()
++	engine.ServeHTTP(response, request)
++	if response.Code != http.StatusPartialContent || response.Header().Get("Content-Range") != "bytes 4-4/5" || response.Body.String() != "e" {
++		t.Fatalf("last-byte response: status=%d range=%q body=%q", response.Code, response.Header().Get("Content-Range"), response.Body.String())
++	}
++}
++
++func TestReaderSingleRangeInvalidInputs(t *testing.T) {
++	if _, err := render.ParseRange("bytes=5-5", 5); !errors.Is(err, render.ErrNoOverlap) {
++		t.Fatalf("ParseRange non-overlap error = %v, want ErrNoOverlap", err)
++	}
++	if value := render.FormatContentRange(0, 1, 5); value != "bytes 0-0/5" {
++		t.Fatalf("first-byte Content-Range = %q, want %q", value, "bytes 0-0/5")
++	}
++
++	negativeResponse := httptest.NewRecorder()
++	negativeRange := render.ReaderRange{
++		ContentType:   "text/plain",
++		ContentLength: 3,
++		ReadSeeker:    bytes.NewReader([]byte("abc")),
++		Ranges:        []render.Range{{Start: -1, Length: 1}},
++	}
++	if err := negativeRange.Render(negativeResponse); err == nil {
++		t.Fatal("Render returned nil for a negative range start")
++	}
++	if negativeResponse.Body.Len() != 0 {
++		t.Fatalf("negative-start body = %q, want empty", negativeResponse.Body.String())
++	}
++
++	overlongResponse := httptest.NewRecorder()
++	overlongRange := render.ReaderRange{
++		ContentType:   "text/plain",
++		ContentLength: 3,
++		ReadSeeker:    bytes.NewReader([]byte("abc")),
++		Ranges:        []render.Range{{Start: 1, Length: 5}},
++	}
++	if err := overlongRange.Render(overlongResponse); err == nil {
++		t.Fatal("overlong Render returned nil error")
++	}
++	if overlongResponse.Body.String() != "" {
++		t.Fatalf("overlong body = %q, want empty", overlongResponse.Body.String())
++	}
++
++	engine := gin.New()
++	engine.MaxRanges = 1
++	engine.GET("/limited", func(context *gin.Context) {
++		context.DataFromReaderRange(http.StatusOK, 5, "text/plain", bytes.NewReader([]byte("abcde")), nil)
++	})
++	request := httptest.NewRequest(http.MethodGet, "/limited", nil)
++	request.Header.Set("Range", "bytes=0-0,2-2")
++	response := httptest.NewRecorder()
++	engine.ServeHTTP(response, request)
++	if response.Code != http.StatusOK {
++		t.Fatalf("too-many-ranges status = %d, want %d", response.Code, http.StatusOK)
++	}
++	if response.Body.String() != "abcde" {
++		t.Fatalf("too-many-ranges body = %q, want full body", response.Body.String())
++	}
++}

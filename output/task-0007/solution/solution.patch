@@ -1,0 +1,637 @@
+diff --git a/context.go b/context.go
+index 1dc730e..5539a46 100644
+--- a/context.go
++++ b/context.go
+@@ -12,11 +12,13 @@ import (
+ 	"log"
+ 	"maps"
+ 	"math"
++	"mime"
+ 	"mime/multipart"
+ 	"net"
+ 	"net/http"
+ 	"net/url"
+ 	"os"
++	"path"
+ 	"path/filepath"
+ 	"strings"
+ 	"sync"
+@@ -24,6 +26,7 @@ import (
+ 
+ 	"github.com/gin-contrib/sse"
+ 	"github.com/gin-gonic/gin/binding"
++	filesystem "github.com/gin-gonic/gin/internal/fs"
+ 	"github.com/gin-gonic/gin/render"
+ )
+ 
+@@ -943,6 +946,120 @@ func (c *Context) ShouldBindWith(obj any, b binding.Binding) error {
+ 	return b.Bind(c.Request, obj)
+ }
+ 
++// DataFromReaderRange writes the specified reader into the body stream, honoring
++// the request Range header for RFC 7233 partial content. It always advertises
++// "Accept-Ranges: bytes". With no Range header (or a rejected If-Range guard, a
++// malformed Range, or more ranges than the effective Engine.MaxRanges limit) it
++// produces exactly the same output as DataFromReader for the given status code.
++// A single satisfiable range yields a 206 response with a Content-Range header;
++// multiple ranges yield a 206 multipart/byteranges document; a syntactically
++// valid but unsatisfiable range yields 416 with "Content-Range: bytes */<size>"
++// and an empty body. It returns true only when a partial (206) response was sent.
++func (c *Context) DataFromReaderRange(code int, contentLength int64, contentType string, reader io.ReadSeeker, extraHeaders map[string]string) bool {
++	c.Writer.Header().Set("Accept-Ranges", "bytes")
++
++	serveFull := func(status int) {
++		c.Render(status, render.Reader{
++			Headers:       extraHeaders,
++			ContentType:   contentType,
++			ContentLength: contentLength,
++			Reader:        reader,
++		})
++	}
++
++	rangeHeader := c.GetHeader("Range")
++	if rangeHeader == "" {
++		serveFull(code)
++		return false
++	}
++
++	// Respect If-Range: only honor the range when the supplied validator matches.
++	if !ifRangeAllowsPartial(c.GetHeader("If-Range"), extraHeaders) {
++		serveFull(http.StatusOK)
++		return false
++	}
++
++	if requestedRangeCount(rangeHeader) > c.engine.effectiveMaxRanges() {
++		serveFull(http.StatusOK)
++		return false
++	}
++
++	ranges, err := render.ParseRange(rangeHeader, contentLength)
++	if err != nil {
++		if errors.Is(err, render.ErrNoOverlap) {
++			// Syntactically valid but unsatisfiable: emit 416 with an empty body.
++			writeRangeHeaders(c.Writer.Header(), extraHeaders)
++			c.Writer.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", contentLength))
++			c.Writer.Header().Set("Content-Length", "0")
++			c.Status(http.StatusRequestedRangeNotSatisfiable)
++			c.Writer.WriteHeaderNow()
++			return false
++		}
++		// Malformed Range header: ignore it and serve the full representation.
++		serveFull(code)
++		return false
++	}
++
++	// No satisfiable range, or more ranges requested than allowed: serve the full body.
++	if len(ranges) == 0 {
++		serveFull(code)
++		return false
++	}
++
++	c.Render(http.StatusPartialContent, render.ReaderRange{
++		ContentType:   contentType,
++		ContentLength: contentLength,
++		ReadSeeker:    reader,
++		Ranges:        ranges,
++		Headers:       extraHeaders,
++	})
++	return true
++}
++
++// FileFromFSRange serves a file from the given io/fs.FS while honoring the
++// request Range header. It routes seekable files through DataFromReaderRange so
++// that partial-content (206/multipart/416) responses are produced as
++// appropriate, and returns 404 for a missing path.
++func (c *Context) FileFromFSRange(filepath string, root fs.FS) {
++	name := strings.TrimPrefix(filepath, "/")
++	f, err := root.Open(name)
++	if err != nil {
++		c.Writer.WriteHeader(http.StatusNotFound)
++		return
++	}
++	defer f.Close()
++
++	info, err := f.Stat()
++	if err != nil || info.IsDir() {
++		c.Writer.WriteHeader(http.StatusNotFound)
++		return
++	}
++
++	contentType := mime.TypeByExtension(path.Ext(filepath))
++	if contentType == "" {
++		contentType = "application/octet-stream"
++	}
++
++	extraHeaders := map[string]string{
++		"Last-Modified": info.ModTime().UTC().Format(http.TimeFormat),
++	}
++
++	rangeFile, err := filesystem.SeekableFile(f)
++	if err == nil {
++		c.DataFromReaderRange(http.StatusOK, rangeFile.Size(), contentType, rangeFile, extraHeaders)
++		return
++	}
++
++	// The file is not seekable; fall back to serving the full body.
++	c.Writer.Header().Set("Accept-Ranges", "bytes")
++	c.Render(http.StatusOK, render.Reader{
++		Headers:       extraHeaders,
++		ContentType:   contentType,
++		ContentLength: info.Size(),
++		Reader:        f,
++	})
++}
++
+ // ShouldBindBodyWith is similar with ShouldBindWith, but it stores the request
+ // body into the context, and reuse when it is called again.
+ //
+diff --git a/gin.go b/gin.go
+index 2e033bf..6720131 100644
+--- a/gin.go
++++ b/gin.go
+@@ -24,6 +24,7 @@ import (
+ 
+ const (
+ 	defaultMultipartMemory = 32 << 20 // 32 MB
++	defaultMaxRanges       = 16       // default cap on Range parts a single request may ask for
+ 	escapedColon           = "\\:"
+ 	colon                  = ":"
+ 	backslash              = "\\"
+@@ -172,6 +173,11 @@ type Engine struct {
+ 	// ContextWithFallback enable fallback Context.Deadline(), Context.Done(), Context.Err() and Context.Value() when Context.Request.Context() is not nil.
+ 	ContextWithFallback bool
+ 
++	// MaxRanges bounds how many ranges a single Range request may ask for, guarding
++	// against many-range amplification. A value of 0 means use the internal default
++	// of 16 ranges. Requests exceeding this limit fall back to serving the full body.
++	MaxRanges int
++
+ 	delims           render.Delims
+ 	secureJSONPrefix string
+ 	HTMLRender       render.HTMLRender
+@@ -219,6 +225,7 @@ func New(opts ...OptionFunc) *Engine {
+ 		RemoveExtraSlash:       false,
+ 		UnescapePathValues:     true,
+ 		MaxMultipartMemory:     defaultMultipartMemory,
++		MaxRanges:              defaultMaxRanges,
+ 		trees:                  make(methodTrees, 0, 9),
+ 		delims:                 render.Delims{Left: "{{", Right: "}}"},
+ 		secureJSONPrefix:       "while(1);",
+diff --git a/internal/fs/fs.go b/internal/fs/fs.go
+index c253038..5b6faf9 100644
+--- a/internal/fs/fs.go
++++ b/internal/fs/fs.go
+@@ -1,10 +1,51 @@
+ package fs
+ 
+ import (
++	"errors"
++	"io"
+ 	"io/fs"
+ 	"net/http"
++	"time"
+ )
+ 
++// ErrNotSeekable is returned by SeekableFile when the supplied fs.File does not
++// implement io.Seeker and therefore cannot back a Range-aware response. Callers
++// should fall back to serving the full body.
++var ErrNotSeekable = errors.New("gin: fs.File is not seekable")
++
++// RangeFile adapts a seekable fs.File to an io.ReadSeeker while exposing the
++// size and modification time needed to serve RFC 7233 partial-content responses.
++type RangeFile struct {
++	io.ReadSeeker
++	size    int64
++	modTime time.Time
++}
++
++// Size returns the total size of the underlying file in bytes.
++func (f *RangeFile) Size() int64 { return f.size }
++
++// ModTime returns the modification time of the underlying file.
++func (f *RangeFile) ModTime() time.Time { return f.modTime }
++
++// SeekableFile adapts a seekable fs.File to a *RangeFile, reporting its size and
++// modtime. It returns ErrNotSeekable when the file does not implement io.Seeker,
++// so callers can fall back to full-body serving.
++func SeekableFile(f fs.File) (*RangeFile, error) {
++	seeker, ok := f.(io.ReadSeeker)
++	if !ok {
++		return nil, ErrNotSeekable
++	}
++	info, err := f.Stat()
++	if err != nil {
++		return nil, err
++	}
++	return &RangeFile{
++		ReadSeeker: seeker,
++		size:       info.Size(),
++		modTime:    info.ModTime(),
++	}, nil
++}
++
+ // FileSystem implements an [fs.FS].
+ type FileSystem struct {
+ 	http.FileSystem
+diff --git a/range.go b/range.go
+new file mode 100644
+index 0000000..e53c026
+--- /dev/null
++++ b/range.go
+@@ -0,0 +1,89 @@
++// Copyright 2024 Gin Core Team. All rights reserved.
++// Use of this source code is governed by a MIT style
++// license that can be found in the LICENSE file.
++
++package gin
++
++import (
++	"net/http"
++	"strings"
++)
++
++// effectiveMaxRanges returns the maximum number of ranges a single request may
++// ask for. A zero MaxRanges falls back to the internal defaultMaxRanges.
++func (engine *Engine) effectiveMaxRanges() int {
++	if engine != nil && engine.MaxRanges > 0 {
++		return engine.MaxRanges
++	}
++	return defaultMaxRanges
++}
++
++func requestedRangeCount(rangeHeader string) int {
++	const prefix = "bytes="
++	if !strings.HasPrefix(rangeHeader, prefix) {
++		return 0
++	}
++	return strings.Count(rangeHeader[len(prefix):], ",") + 1
++}
++
++func writeRangeHeaders(header http.Header, extraHeaders map[string]string) {
++	for key, value := range extraHeaders {
++		if header.Get(key) == "" {
++			header.Set(key, value)
++		}
++	}
++}
++
++// isETagValidator reports whether s looks like an entity-tag validator (i.e. it
++// is quoted or carries the weak "W/" prefix) rather than an HTTP-date.
++func isETagValidator(s string) bool {
++	return len(s) >= 2 && (s[0] == '"' || strings.HasPrefix(s, "W/"))
++}
++
++// strongETagMatch performs a strong comparison of two entity-tags as required
++// for range requests. Weak validators ("W/"-prefixed) never match.
++func strongETagMatch(a, b string) bool {
++	if a == "" || b == "" {
++		return false
++	}
++	if strings.HasPrefix(a, "W/") || strings.HasPrefix(b, "W/") {
++		return false
++	}
++	return a == b
++}
++
++// ifRangeAllowsPartial evaluates an If-Range request-header value against the
++// representation's validators. It returns true when the Range request should be
++// honored: either there is no If-Range guard, or the supplied ETag / Last-Modified
++// validator matches. Any mismatch or unparsable input causes the caller to serve
++// the full representation instead.
++func ifRangeAllowsPartial(ifRange string, extraHeaders map[string]string) bool {
++	ifRange = strings.TrimSpace(ifRange)
++	if ifRange == "" {
++		return true
++	}
++
++	var etag, lastModified string
++	if extraHeaders != nil {
++		etag = extraHeaders["ETag"]
++		lastModified = extraHeaders["Last-Modified"]
++	}
++
++	if isETagValidator(ifRange) {
++		return strongETagMatch(ifRange, strings.TrimSpace(etag))
++	}
++
++	// Otherwise treat If-Range as an HTTP-date and compare against Last-Modified.
++	if lastModified == "" {
++		return false
++	}
++	lm, err := http.ParseTime(strings.TrimSpace(lastModified))
++	if err != nil {
++		return false
++	}
++	ir, err := http.ParseTime(ifRange)
++	if err != nil {
++		return false
++	}
++	return ir.Equal(lm)
++}
+diff --git a/render/range.go b/render/range.go
+new file mode 100644
+index 0000000..bd46278
+--- /dev/null
++++ b/render/range.go
+@@ -0,0 +1,138 @@
++// Copyright 2024 Gin Core Team. All rights reserved.
++// Use of this source code is governed by a MIT style
++// license that can be found in the LICENSE file.
++
++package render
++
++import (
++	"errors"
++	"strconv"
++	"strings"
++)
++
++// ErrNoOverlap is returned by ParseRange if first-byte-pos of all of the
++// byte-range-spec values is greater than the content size.
++var ErrNoOverlap = errors.New("invalid range: failed to overlap")
++
++var errInvalidRange = errors.New("invalid range")
++
++// byteRangePrefix is the only range unit supported per RFC 7233.
++const byteRangePrefix = "bytes="
++
++// defaultBoundary is used for multipart/byteranges responses when no explicit
++// boundary is supplied.
++const defaultBoundary = "GINBYTERANGEBOUNDARY"
++
++// mimeByteRanges is the base media type used for multi-range responses.
++const mimeByteRanges = "multipart/byteranges"
++
++// Range specifies the byte range to be sent to the client.
++type Range struct {
++	Start  int64
++	Length int64
++}
++
++// FormatContentRange returns the value of a Content-Range header for a single
++// range in the form "bytes <start>-<start+length-1>/<size>".
++func FormatContentRange(start, length, size int64) string {
++	b := strings.Builder{}
++	b.WriteString("bytes ")
++	b.WriteString(strconv.FormatInt(start, 10))
++	b.WriteByte('-')
++	b.WriteString(strconv.FormatInt(start+length-1, 10))
++	b.WriteByte('/')
++	b.WriteString(strconv.FormatInt(size, 10))
++	return b.String()
++}
++
++// ParseRange parses a Range header string as per RFC 7233 against a known
++// content size. It supports the "start-end", "start-" and "-suffix" forms,
++// clamps end to size-1, skips fully out-of-window parts, and returns
++// ErrNoOverlap when no requested part overlaps the content.
++func ParseRange(rangeHeader string, size int64) ([]Range, error) {
++	if rangeHeader == "" {
++		return nil, nil
++	}
++	if size < 0 {
++		return nil, errInvalidRange
++	}
++	if !strings.HasPrefix(rangeHeader, byteRangePrefix) {
++		return nil, errInvalidRange
++	}
++	specs := strings.Split(rangeHeader[len(byteRangePrefix):], ",")
++	if len(specs) == 0 {
++		return nil, errInvalidRange
++	}
++	var ranges []Range
++	noOverlap := false
++	for _, ra := range specs {
++		ra = strings.TrimSpace(ra)
++		if ra == "" {
++			return nil, errInvalidRange
++		}
++		start, end, ok := strings.Cut(ra, "-")
++		if !ok {
++			return nil, errors.New("invalid range: missing dash")
++		}
++		start, end = strings.TrimSpace(start), strings.TrimSpace(end)
++		var r Range
++		if start == "" {
++			// suffix range: -N -> last N bytes.
++			if end == "" {
++				return nil, errors.New("invalid range: empty spec")
++			}
++			i, err := strconv.ParseInt(end, 10, 64)
++			if err != nil {
++				return nil, errors.New("invalid range: bad suffix length")
++			}
++			if i <= 0 {
++				return nil, errors.New("invalid range: negative suffix length")
++			}
++			if size == 0 {
++				noOverlap = true
++				continue
++			}
++			if i > size {
++				i = size
++			}
++			r.Start = size - i
++			r.Length = size - r.Start
++		} else {
++			i, err := strconv.ParseInt(start, 10, 64)
++			if err != nil || i < 0 {
++				return nil, errors.New("invalid range: bad start")
++			}
++			if i >= size {
++				// This range is out of window (start beyond content).
++				noOverlap = true
++				continue
++			}
++			r.Start = i
++			if end == "" {
++				// open-ended range: N-
++				r.Length = size - r.Start
++			} else {
++				j, err := strconv.ParseInt(end, 10, 64)
++				if err != nil || j < 0 {
++					return nil, errors.New("invalid range: bad end")
++				}
++				if j < i {
++					return nil, errors.New("invalid range: inverted range")
++				}
++				// clamp end to size-1
++				if j >= size {
++					j = size - 1
++				}
++				r.Length = j - r.Start + 1
++			}
++		}
++		ranges = append(ranges, r)
++	}
++	if len(ranges) == 0 && noOverlap {
++		return nil, ErrNoOverlap
++	}
++	if len(ranges) == 0 {
++		return nil, errInvalidRange
++	}
++	return ranges, nil
++}
+diff --git a/render/reader.go b/render/reader.go
+index ae1a7b5..f08499c 100644
+--- a/render/reader.go
++++ b/render/reader.go
+@@ -5,8 +5,11 @@
+ package render
+ 
+ import (
++	"errors"
+ 	"io"
++	"mime/multipart"
+ 	"net/http"
++	"net/textproto"
+ 	"strconv"
+ )
+ 
+@@ -46,3 +49,134 @@ func (r Reader) writeHeaders(w http.ResponseWriter) {
+ 		}
+ 	}
+ }
++
++// ReaderRange renders a single or multiple byte range of an io.ReadSeeker as an
++// RFC 7233 compliant partial-content (206) response. When a single range is
++// requested it writes the range body together with a Content-Range header; when
++// multiple ranges are requested it emits a multipart/byteranges document.
++type ReaderRange struct {
++	ContentType   string
++	ContentLength int64
++	ReadSeeker    io.ReadSeeker
++	Ranges        []Range
++	Boundary      string
++	Headers       map[string]string
++}
++
++// countingWriter counts how many bytes have been written to it.
++type countingWriter int64
++
++func (w *countingWriter) Write(p []byte) (int, error) {
++	*w += countingWriter(len(p))
++	return len(p), nil
++}
++
++// boundary returns the multipart boundary, defaulting when none was supplied.
++func (r ReaderRange) boundary() string {
++	if r.Boundary != "" {
++		return r.Boundary
++	}
++	return defaultBoundary
++}
++
++// WriteContentType (ReaderRange) writes the appropriate ContentType: the original
++// content type for a single range, or multipart/byteranges for multiple ranges.
++func (r ReaderRange) WriteContentType(w http.ResponseWriter) {
++	if len(r.Ranges) > 1 {
++		writeContentType(w, []string{mimeByteRanges + "; boundary=" + r.boundary()})
++		return
++	}
++	writeContentType(w, []string{r.ContentType})
++}
++
++// writeHeaders writes custom headers from r.Headers into the response, without
++// overriding headers that are already set.
++func (r ReaderRange) writeHeaders(w http.ResponseWriter) {
++	header := w.Header()
++	for k, v := range r.Headers {
++		if header.Get(k) == "" {
++			header.Set(k, v)
++		}
++	}
++}
++
++// Render (ReaderRange) writes the requested byte range(s) as a 206 response.
++func (r ReaderRange) Render(w http.ResponseWriter) error {
++	if r.ReadSeeker == nil {
++		return errors.New("render: nil range reader")
++	}
++	if len(r.Ranges) == 0 {
++		return errors.New("render: no byte ranges")
++	}
++	for _, ra := range r.Ranges {
++		if ra.Start < 0 || ra.Length <= 0 || ra.Start > r.ContentLength-ra.Length {
++			return errors.New("render: byte range outside content")
++		}
++	}
++
++	r.WriteContentType(w)
++	r.writeHeaders(w)
++	header := w.Header()
++
++	if len(r.Ranges) == 1 {
++		ra := r.Ranges[0]
++		header.Set("Content-Range", FormatContentRange(ra.Start, ra.Length, r.ContentLength))
++		header.Set("Content-Length", strconv.FormatInt(ra.Length, 10))
++		w.WriteHeader(http.StatusPartialContent)
++		if _, err := r.ReadSeeker.Seek(ra.Start, io.SeekStart); err != nil {
++			return err
++		}
++		_, err := io.CopyN(w, r.ReadSeeker, ra.Length)
++		return err
++	}
++
++	boundary := r.boundary()
++
++	// Pre-compute the Content-Length of the multipart/byteranges document.
++	var cw countingWriter
++	sizer := multipart.NewWriter(&cw)
++	if err := sizer.SetBoundary(boundary); err != nil {
++		return err
++	}
++	var partsSize int64
++	for _, ra := range r.Ranges {
++		if _, err := sizer.CreatePart(r.partHeader(ra)); err != nil {
++			return err
++		}
++		partsSize += ra.Length
++	}
++	if err := sizer.Close(); err != nil {
++		return err
++	}
++	header.Set("Content-Length", strconv.FormatInt(int64(cw)+partsSize, 10))
++
++	w.WriteHeader(http.StatusPartialContent)
++
++	mw := multipart.NewWriter(w)
++	if err := mw.SetBoundary(boundary); err != nil {
++		return err
++	}
++	for _, ra := range r.Ranges {
++		part, err := mw.CreatePart(r.partHeader(ra))
++		if err != nil {
++			return err
++		}
++		if _, err := r.ReadSeeker.Seek(ra.Start, io.SeekStart); err != nil {
++			return err
++		}
++		if _, err := io.CopyN(part, r.ReadSeeker, ra.Length); err != nil {
++			return err
++		}
++	}
++	return mw.Close()
++}
++
++// partHeader builds the per-part MIME header for a range in a multipart response.
++func (r ReaderRange) partHeader(ra Range) textproto.MIMEHeader {
++	h := make(textproto.MIMEHeader, 2)
++	if r.ContentType != "" {
++		h.Set("Content-Type", r.ContentType)
++	}
++	h.Set("Content-Range", FormatContentRange(ra.Start, ra.Length, r.ContentLength))
++	return h
++}
+diff --git a/render/render.go b/render/render.go
+index 28bc0f5..de2251c 100644
+--- a/render/render.go
++++ b/render/render.go
+@@ -28,6 +28,7 @@ var (
+ 	_ HTMLRender = (*HTMLProduction)(nil)
+ 	_ Render     = (*YAML)(nil)
+ 	_ Render     = (*Reader)(nil)
++	_ Render     = ReaderRange{}
+ 	_ Render     = (*AsciiJSON)(nil)
+ 	_ Render     = (*ProtoBuf)(nil)
+ 	_ Render     = (*TOML)(nil)

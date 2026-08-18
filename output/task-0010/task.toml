@@ -1,0 +1,44 @@
+schema_version = "1.3"
+artifacts = ["/logs/artifacts"]
+
+[[verifier.collect]]
+command = "cd /app && git add -A && git diff --binary --cached ee20f426ddf338ac7ead5c5f00ea49258005caaf > /logs/artifacts/model.patch"
+service = "main"
+
+[task]
+name = "deepswe/task-0010"
+description = "Add deterministic result sorting with `--sort <key>` and `--reverse`"
+authors = []
+keywords = []
+
+[metadata]
+task_id = "add-deterministic-result-sorting-with-sort-k-0010"
+display_title = "Add deterministic result sorting with `--sort <key>` and `--reverse`"
+display_description = "`fd` currently emits results in filesystem/traversal order, which is nondeterministic because the directory walk is parallelized. Users who pipe `fd` into scripts, snapshots, or `--exec` pipelines frequently need a stable, predictable ordering. Add a first-class sorting facility. Introduce a new `--sort <key>` option. The accepted keys are `path`, `name`, `size`, `modified`, `accessed`, `created`, `extension`, and `none`. `none` is the default and MUST preserve today's streaming behavior exactly"
+original_title = "Add deterministic result sorting with `--sort <key>` and `--reverse`"
+category = "feature_request"
+language = "rust"
+repository = "sharkdp/fd"
+repository_url = "https://github.com/sharkdp/fd.git"
+base_commit_hash = "ee20f426ddf338ac7ead5c5f00ea49258005caaf"
+
+[verifier]
+network_mode = "public"
+environment_mode = "shared"
+timeout_sec = 1800.0
+
+[verifier.env]
+[agent]
+network_mode = "public"
+timeout_sec = 5400.0
+
+[environment]
+build_timeout_sec = 1800.0
+cpus = 2
+memory_mb = 8192
+storage_mb = 20480
+gpus = 0
+mcp_servers = []
+
+[environment.env]
+[solution.env]

@@ -1,0 +1,44 @@
+schema_version = "1.3"
+artifacts = ["/logs/artifacts"]
+
+[[verifier.collect]]
+command = "cd /app && git add -A && git diff --binary --cached 4ee41929eaf4fc1e5662c9b4befd05230688ca62 > /logs/artifacts/model.patch"
+service = "main"
+
+[task]
+name = "deepswe/task-0005"
+description = "codex exec: wall-clock and command-count run limits with a structured limit-reached event"
+authors = []
+keywords = []
+
+[metadata]
+task_id = "codex-exec-wall-clock-and-command-count-run-0005"
+display_title = "codex exec: wall-clock and command-count run limits with a structured limit-reached event"
+display_description = "Automated and CI usage of `codex exec` currently has no built-in way to bound how long a non-interactive run may execute or how many shell/tool commands it may run before it is stopped. Long-running or runaway agent turns can consume unbounded wall-clock time and keep invoking commands until the model decides to stop. We want first-class guardrails so that a run can be capped and stopped gracefully, and so that machine consumers of the JSON event stream can detect that a run ended because a limi"
+original_title = "codex exec: wall-clock and command-count run limits with a structured limit-reached event"
+category = "feature_request"
+language = "rust"
+repository = "openai/codex"
+repository_url = "https://github.com/openai/codex.git"
+base_commit_hash = "4ee41929eaf4fc1e5662c9b4befd05230688ca62"
+
+[verifier]
+network_mode = "public"
+environment_mode = "shared"
+timeout_sec = 1800.0
+
+[verifier.env]
+[agent]
+network_mode = "public"
+timeout_sec = 5400.0
+
+[environment]
+build_timeout_sec = 1800.0
+cpus = 2
+memory_mb = 8192
+storage_mb = 20480
+gpus = 0
+mcp_servers = []
+
+[environment.env]
+[solution.env]

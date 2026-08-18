@@ -1,0 +1,27 @@
+{
+  "build_mode": "local_pinned_checkout",
+  "build_elapsed_seconds": 51.791,
+  "verifier": {
+    "id": "sha256:21adc406d31bed06bb42bd5ca3bd37c7ef4d600ba46ce7f0e89d3516d1f94815",
+    "repo_tags": [
+      "deepswe-task-0011-tests:beca84e600e4"
+    ],
+    "labels": {
+      "deepswe.base_sha": "beca84e600e4e250f6b244d22878e72948f331c7",
+      "deepswe.repository": "pmndrs/zustand",
+      "deepswe.source_mode": "local-pinned-checkout"
+    }
+  },
+  "environment": {
+    "id": "sha256:c34b25b04eb3fdef7f2c8bb48230357d181414dc8e8e33f70785f7769746bc75",
+    "repo_tags": [
+      "deepswe-task-0011-environment:beca84e600e4"
+    ],
+    "labels": {
+      "deepswe.base_sha": "beca84e600e4e250f6b244d22878e72948f331c7",
+      "deepswe.repository": "pmndrs/zustand",
+      "deepswe.source_mode": "local-pinned-checkout"
+    }
+  },
+  "hidden_test_isolation": true
+}

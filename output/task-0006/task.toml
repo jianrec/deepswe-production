@@ -1,0 +1,44 @@
+schema_version = "1.3"
+artifacts = ["/logs/artifacts"]
+
+[[verifier.collect]]
+command = "cd /app && git add -A && git diff --binary --cached beca84e600e4e250f6b244d22878e72948f331c7 > /logs/artifacts/model.patch"
+service = "main"
+
+[task]
+name = "datacurve/add-a-first-party-history-middleware-for-und-0006"
+description = "Add a first-party `history` middleware for undo/redo and time-travel with React bindings"
+authors = []
+keywords = []
+
+[metadata]
+task_id = "add-a-first-party-history-middleware-for-und-0006"
+display_title = "Add a first-party `history` middleware for undo/redo and time-travel with React bindings"
+display_description = "Zustand ships several first-party middlewares (persist, devtools, redux, immer, subscribeWithSelector, combine) but has no built-in way to record a store's update history for undo/redo and time-travel. Applications that need editors, form wizards, or drawing canvases currently reach for third-party packages or hand-roll snapshot stacks that break when combined with immer or persist. Add a first-party `history` middleware that transparently records past and future states of a store and exposes an"
+original_title = "Add a first-party `history` middleware for undo/redo and time-travel with React bindings"
+category = "feature_request"
+language = "typescript"
+repository = "pmndrs/zustand"
+repository_url = "https://github.com/pmndrs/zustand.git"
+base_commit_hash = "beca84e600e4e250f6b244d22878e72948f331c7"
+
+[verifier]
+network_mode = "public"
+environment_mode = "shared"
+timeout_sec = 1800.0
+
+[verifier.env]
+[agent]
+network_mode = "public"
+timeout_sec = 5400.0
+
+[environment]
+build_timeout_sec = 1800.0
+cpus = 2
+memory_mb = 8192
+storage_mb = 20480
+gpus = 0
+mcp_servers = []
+
+[environment.env]
+[solution.env]

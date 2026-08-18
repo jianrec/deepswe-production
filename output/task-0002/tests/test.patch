@@ -1,0 +1,1177 @@
+diff --git a/hidden/launchadapters/claude_test.go b/hidden/launchadapters/claude_test.go
+new file mode 100644
+index 0000000..29e151d
+--- /dev/null
++++ b/hidden/launchadapters/claude_test.go
+@@ -0,0 +1,81 @@
++package launchadapters_test
++
++import (
++	"context"
++	"os"
++	"path/filepath"
++	"slices"
++	"strings"
++	"testing"
++
++	"github.com/ollama/ollama/cmd/launch"
++)
++
++func fakeBinary(t *testing.T, name, body string) string {
++	t.Helper()
++	dir := t.TempDir()
++	path := filepath.Join(dir, name)
++	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
++		t.Fatal(err)
++	}
++	t.Setenv("PATH", dir)
++	return path
++}
++
++func adapterPlan(t *testing.T, name, model, host string) launch.Plan {
++	t.Helper()
++	plan, err := launch.BuildPlan(context.Background(), name, launch.PlanOptions{Home: t.TempDir(), Model: model, Host: host})
++	if err != nil {
++		t.Fatalf("BuildPlan(%q): %v", name, err)
++	}
++	return plan
++}
++
++func TestClaudePlanUsesResolvedClaudeBinary(t *testing.T) {
++	want := fakeBinary(t, "claude", "#!/bin/sh\nexit 0\n")
++	plan := adapterPlan(t, "claude", "claude-plan-model", "http://127.0.0.1:23001")
++	if plan.Binary != want {
++		t.Fatalf("Binary = %q, want %q", plan.Binary, want)
++	}
++}
++
++func TestClaudePlanIncludesModelArguments(t *testing.T) {
++	fakeBinary(t, "claude", "#!/bin/sh\nexit 0\n")
++	plan := adapterPlan(t, "claude", "claude-plan-model", "http://127.0.0.1:23002")
++	if !slices.Equal(plan.Args, []string{"--model", "claude-plan-model"}) {
++		t.Fatalf("Args = %v", plan.Args)
++	}
++}
++
++func TestClaudePlanUsesRequestedAnthropicBaseURL(t *testing.T) {
++	fakeBinary(t, "claude", "#!/bin/sh\nexit 0\n")
++	host := "http://127.0.0.1:23003"
++	plan := adapterPlan(t, "claude", "claude-plan-model", host)
++	if plan.Env["ANTHROPIC_BASE_URL"] != host {
++		t.Fatalf("ANTHROPIC_BASE_URL = %q, want %q", plan.Env["ANTHROPIC_BASE_URL"], host)
++	}
++}
++
++func TestClaudePlanIncludesEstablishedAuthenticationEnvironment(t *testing.T) {
++	fakeBinary(t, "claude", "#!/bin/sh\nexit 0\n")
++	plan := adapterPlan(t, "claude", "claude-plan-model", "http://127.0.0.1:23004")
++	if plan.Env["ANTHROPIC_AUTH_TOKEN"] != "ollama" {
++		t.Fatalf("ANTHROPIC_AUTH_TOKEN = %q", plan.Env["ANTHROPIC_AUTH_TOKEN"])
++	}
++	if value, ok := plan.Env["ANTHROPIC_API_KEY"]; !ok || value != "" {
++		t.Fatalf("ANTHROPIC_API_KEY missing or nonempty: %q, %v", value, ok)
++	}
++}
++
++func TestClaudePlanIncludesModelEnvironmentForAllModelClasses(t *testing.T) {
++	fakeBinary(t, "claude", "#!/bin/sh\nexit 0\n")
++	plan := adapterPlan(t, "claude", "claude-plan-model", "http://127.0.0.1:23005")
++	for _, key := range []string{"ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL", "CLAUDE_CODE_SUBAGENT_MODEL"} {
++		if value := plan.Env[key]; value != "claude-plan-model" {
++			t.Fatalf("%s = %q", key, value)
++		}
++	}
++	if strings.TrimSpace(plan.Model) != "claude-plan-model" {
++		t.Fatalf("Model = %q", plan.Model)
++	}
++}
+diff --git a/hidden/launchadapters/codex_test.go b/hidden/launchadapters/codex_test.go
+new file mode 100644
+index 0000000..802e865
+--- /dev/null
++++ b/hidden/launchadapters/codex_test.go
+@@ -0,0 +1,75 @@
++package launchadapters_test
++
++import (
++	"path/filepath"
++	"slices"
++	"strings"
++	"testing"
++
++	"github.com/ollama/ollama/cmd/launch"
++)
++
++func codexFile(t *testing.T, plan launch.Plan, base string) launch.PlannedFile {
++	t.Helper()
++	for _, file := range plan.Files {
++		if filepath.Base(file.Path) == base {
++			return file
++		}
++	}
++	t.Fatalf("codex plan has no %s: %#v", base, plan.Files)
++	return launch.PlannedFile{}
++}
++
++func TestCodexPlanUsesResolvedCodexBinary(t *testing.T) {
++	want := fakeBinary(t, "codex", "#!/bin/sh\nexit 0\n")
++	plan := adapterPlan(t, "codex", "codex-plan-model", "http://127.0.0.1:23201")
++	if plan.Binary != want {
++		t.Fatalf("Binary = %q, want %q", plan.Binary, want)
++	}
++}
++
++func TestCodexPlanIncludesManagedProfileArguments(t *testing.T) {
++	fakeBinary(t, "codex", "#!/bin/sh\nexit 0\n")
++	plan := adapterPlan(t, "codex", "codex-plan-model", "http://127.0.0.1:23202")
++	if !slices.Contains(plan.Args, "--profile") || !slices.Contains(plan.Args, "ollama-launch") {
++		t.Fatalf("Args do not select managed profile: %v", plan.Args)
++	}
++	if !slices.Contains(plan.Args, "-m") || !slices.Contains(plan.Args, "codex-plan-model") {
++		t.Fatalf("Args do not select model: %v", plan.Args)
++	}
++}
++
++func TestCodexPlanContainsOwnedProfileConfig(t *testing.T) {
++	fakeBinary(t, "codex", "#!/bin/sh\nexit 0\n")
++	plan := adapterPlan(t, "codex", "codex-plan-model", "http://127.0.0.1:23203")
++	file := codexFile(t, plan, "ollama-launch.config.toml")
++	for _, want := range []string{"codex-plan-model", "ollama-launch", "responses", "127.0.0.1:23203", "/v1/"} {
++		if !strings.Contains(file.Contents, want) {
++			t.Fatalf("profile config missing %q:\n%s", want, file.Contents)
++		}
++	}
++}
++
++func TestCodexPlanContainsModelCatalog(t *testing.T) {
++	fakeBinary(t, "codex", "#!/bin/sh\nexit 0\n")
++	plan := adapterPlan(t, "codex", "codex-plan-model", "http://127.0.0.1:23204")
++	file := codexFile(t, plan, "model.json")
++	if !strings.Contains(file.Contents, `"slug": "codex-plan-model"`) && !strings.Contains(file.Contents, `"slug":"codex-plan-model"`) {
++		t.Fatalf("model catalog missing selected model:\n%s", file.Contents)
++	}
++}
++
++func TestCodexPlanFilesStayInsideRequestedHome(t *testing.T) {
++	home := t.TempDir()
++	fakeBinary(t, "codex", "#!/bin/sh\nexit 0\n")
++	plan, err := launch.BuildPlan(t.Context(), "codex", launch.PlanOptions{Home: home, Model: "codex-plan-model", Host: "http://127.0.0.1:23205"})
++	if err != nil {
++		t.Fatal(err)
++	}
++	for _, file := range plan.Files {
++		rel, err := filepath.Rel(home, file.Path)
++		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
++			t.Fatalf("file outside requested home: %q", file.Path)
++		}
++	}
++}
+diff --git a/hidden/launchadapters/copilot_test.go b/hidden/launchadapters/copilot_test.go
+new file mode 100644
+index 0000000..231c6cd
+--- /dev/null
++++ b/hidden/launchadapters/copilot_test.go
+@@ -0,0 +1,54 @@
++package launchadapters_test
++
++import (
++	"slices"
++	"strings"
++	"testing"
++)
++
++func TestCopilotPlanUsesResolvedCopilotBinary(t *testing.T) {
++	want := fakeBinary(t, "copilot", "#!/bin/sh\nexit 0\n")
++	plan := adapterPlan(t, "copilot", "copilot-plan-model", "http://127.0.0.1:23101")
++	if plan.Binary != want {
++		t.Fatalf("Binary = %q, want %q", plan.Binary, want)
++	}
++}
++
++func TestCopilotPlanIncludesModelArguments(t *testing.T) {
++	fakeBinary(t, "copilot", "#!/bin/sh\nexit 0\n")
++	plan := adapterPlan(t, "copilot", "copilot-plan-model", "http://127.0.0.1:23102")
++	if !slices.Equal(plan.Args, []string{"--model", "copilot-plan-model"}) {
++		t.Fatalf("Args = %v", plan.Args)
++	}
++}
++
++func TestCopilotPlanUsesRequestedProviderBaseURL(t *testing.T) {
++	fakeBinary(t, "copilot", "#!/bin/sh\nexit 0\n")
++	host := "http://127.0.0.1:23103"
++	plan := adapterPlan(t, "copilot", "copilot-plan-model", host)
++	if value := plan.Env["COPILOT_PROVIDER_BASE_URL"]; !strings.Contains(value, "127.0.0.1:23103") || !strings.HasSuffix(value, "/v1") {
++		t.Fatalf("COPILOT_PROVIDER_BASE_URL = %q", value)
++	}
++}
++
++func TestCopilotPlanIncludesEstablishedProviderEnvironment(t *testing.T) {
++	fakeBinary(t, "copilot", "#!/bin/sh\nexit 0\n")
++	plan := adapterPlan(t, "copilot", "copilot-plan-model", "http://127.0.0.1:23104")
++	if plan.Env["COPILOT_PROVIDER_WIRE_API"] != "responses" {
++		t.Fatalf("COPILOT_PROVIDER_WIRE_API = %q", plan.Env["COPILOT_PROVIDER_WIRE_API"])
++	}
++	if value, ok := plan.Env["COPILOT_PROVIDER_API_KEY"]; !ok || value != "" {
++		t.Fatalf("COPILOT_PROVIDER_API_KEY missing or nonempty: %q, %v", value, ok)
++	}
++}
++
++func TestCopilotPlanIncludesSelectedModelEnvironment(t *testing.T) {
++	fakeBinary(t, "copilot", "#!/bin/sh\nexit 0\n")
++	plan := adapterPlan(t, "copilot", "copilot-plan-model", "http://127.0.0.1:23105")
++	if plan.Env["COPILOT_MODEL"] != "copilot-plan-model" {
++		t.Fatalf("COPILOT_MODEL = %q", plan.Env["COPILOT_MODEL"])
++	}
++	if plan.Model != "copilot-plan-model" {
++		t.Fatalf("Model = %q", plan.Model)
++	}
++}
+diff --git a/hidden/launchadapters/droid_test.go b/hidden/launchadapters/droid_test.go
+new file mode 100644
+index 0000000..37a0b2d
+--- /dev/null
++++ b/hidden/launchadapters/droid_test.go
+@@ -0,0 +1,107 @@
++package launchadapters_test
++
++import (
++	"encoding/json"
++	"os"
++	"path/filepath"
++	"strings"
++	"testing"
++
++	"github.com/ollama/ollama/cmd/launch"
++)
++
++func droidSettingsFile(t *testing.T, plan launch.Plan) launch.PlannedFile {
++	t.Helper()
++	for _, file := range plan.Files {
++		if filepath.Base(file.Path) == "settings.json" {
++			return file
++		}
++	}
++	t.Fatalf("droid plan has no settings.json: %#v", plan.Files)
++	return launch.PlannedFile{}
++}
++
++func parseObject(t *testing.T, contents string) map[string]any {
++	t.Helper()
++	var object map[string]any
++	if err := json.Unmarshal([]byte(contents), &object); err != nil {
++		t.Fatalf("invalid JSON: %v\n%s", err, contents)
++	}
++	return object
++}
++
++func TestDroidPlanUsesResolvedDroidBinary(t *testing.T) {
++	want := fakeBinary(t, "droid", "#!/bin/sh\nexit 0\n")
++	plan := adapterPlan(t, "droid", "droid-plan-model", "http://127.0.0.1:23301")
++	if plan.Binary != want {
++		t.Fatalf("Binary = %q, want %q", plan.Binary, want)
++	}
++}
++
++func TestDroidPlanCreatesFactorySettingsPath(t *testing.T) {
++	home := t.TempDir()
++	fakeBinary(t, "droid", "#!/bin/sh\nexit 0\n")
++	plan, err := launch.BuildPlan(t.Context(), "droid", launch.PlanOptions{Home: home, Model: "droid-plan-model", Host: "http://127.0.0.1:23302"})
++	if err != nil {
++		t.Fatal(err)
++	}
++	file := droidSettingsFile(t, plan)
++	if file.Path != filepath.Join(home, ".factory", "settings.json") {
++		t.Fatalf("Path = %q", file.Path)
++	}
++	if file.Action != launch.FileCreate {
++		t.Fatalf("Action = %q, want create", file.Action)
++	}
++}
++
++func TestDroidPlanContainsSelectedCustomModel(t *testing.T) {
++	fakeBinary(t, "droid", "#!/bin/sh\nexit 0\n")
++	plan := adapterPlan(t, "droid", "droid-plan-model", "http://127.0.0.1:23303")
++	settings := parseObject(t, droidSettingsFile(t, plan).Contents)
++	models, ok := settings["customModels"].([]any)
++	if !ok || len(models) == 0 {
++		t.Fatalf("customModels = %#v", settings["customModels"])
++	}
++	model, ok := models[0].(map[string]any)
++	if !ok || model["model"] != "droid-plan-model" {
++		t.Fatalf("first custom model = %#v", models[0])
++	}
++}
++
++func TestDroidPlanContainsRequestedHostAndProvider(t *testing.T) {
++	fakeBinary(t, "droid", "#!/bin/sh\nexit 0\n")
++	plan := adapterPlan(t, "droid", "droid-plan-model", "http://127.0.0.1:23304")
++	settings := parseObject(t, droidSettingsFile(t, plan).Contents)
++	models := settings["customModels"].([]any)
++	model := models[0].(map[string]any)
++	if value, _ := model["baseUrl"].(string); !strings.Contains(value, "127.0.0.1:23304") || !strings.HasSuffix(value, "/v1") {
++		t.Fatalf("baseUrl = %q", value)
++	}
++	if model["provider"] != "generic-chat-completion-api" || model["apiKey"] != "ollama" {
++		t.Fatalf("provider fields = %#v", model)
++	}
++}
++
++func TestDroidPlanMergesAndPreservesExistingSettings(t *testing.T) {
++	home := t.TempDir()
++	path := filepath.Join(home, ".factory", "settings.json")
++	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(path, []byte(`{"theme":"dark","enableHooks":true}`), 0o644); err != nil {
++		t.Fatal(err)
++	}
++	fakeBinary(t, "droid", "#!/bin/sh\nexit 0\n")
++	plan, err := launch.BuildPlan(t.Context(), "droid", launch.PlanOptions{Home: home, Model: "droid-plan-model", Host: "http://127.0.0.1:23305"})
++	if err != nil {
++		t.Fatal(err)
++	}
++	file := droidSettingsFile(t, plan)
++	if file.Action != launch.FileMerge {
++		t.Fatalf("Action = %q, want merge", file.Action)
++	}
++	settings := parseObject(t, file.Contents)
++	if settings["theme"] != "dark" || settings["enableHooks"] != true {
++		t.Fatalf("existing settings not preserved: %#v", settings)
++	}
++}
+diff --git a/hidden/launchcli/dry_run_test.go b/hidden/launchcli/dry_run_test.go
+new file mode 100644
+index 0000000..ec49618
+--- /dev/null
++++ b/hidden/launchcli/dry_run_test.go
+@@ -0,0 +1,194 @@
++package launchcli_test
++
++import (
++	"encoding/json"
++	"os"
++	"os/exec"
++	"path/filepath"
++	"strings"
++	"sync"
++	"testing"
++
++	"github.com/ollama/ollama/cmd/launch"
++)
++
++var buildOnce sync.Once
++var binaryPath string
++var binaryBuildError error
++
++func repositoryRoot(t *testing.T) string {
++	t.Helper()
++	cwd, err := os.Getwd()
++	if err != nil {
++		t.Fatal(err)
++	}
++	return filepath.Clean(filepath.Join(cwd, "..", ".."))
++}
++
++func ollamaBinary(t *testing.T) string {
++	t.Helper()
++	buildOnce.Do(func() {
++		dir, err := os.MkdirTemp("", "launch-plan-cli-")
++		if err != nil {
++			binaryBuildError = err
++			return
++		}
++		binaryPath = filepath.Join(dir, "ollama")
++		cmd := exec.Command("go", "build", "-o", binaryPath, ".")
++		cmd.Dir = repositoryRoot(t)
++		cmd.Env = append(os.Environ(), "GOENV=off")
++		output, err := cmd.CombinedOutput()
++		if err != nil {
++			binaryBuildError = &buildError{err: err, output: string(output)}
++		}
++	})
++	if binaryBuildError != nil {
++		t.Fatalf("build ollama: %v", binaryBuildError)
++	}
++	return binaryPath
++}
++
++type buildError struct {
++	err error
++	output string
++}
++
++func (e *buildError) Error() string { return e.err.Error() + ": " + e.output }
++
++func runCLI(t *testing.T, home string, toolBody string, extraEnv []string, args ...string) ([]byte, error) {
++	t.Helper()
++	toolDir := t.TempDir()
++	if toolBody == "" {
++		toolBody = "#!/bin/sh\nexit 0\n"
++	}
++	for _, name := range []string{"claude", "codex", "copilot", "droid", "opencode"} {
++		if err := os.WriteFile(filepath.Join(toolDir, name), []byte(toolBody), 0o755); err != nil {
++			t.Fatal(err)
++		}
++	}
++	cmd := exec.Command(ollamaBinary(t), args...)
++	cmd.Dir = repositoryRoot(t)
++	cmd.Env = append(os.Environ(),
++		"HOME="+home,
++		"USERPROFILE="+home,
++		"PATH="+toolDir+string(os.PathListSeparator)+os.Getenv("PATH"),
++		"OLLAMA_HOST=http://127.0.0.1:24115",
++	)
++	cmd.Env = append(cmd.Env, extraEnv...)
++	return cmd.CombinedOutput()
++}
++
++func TestLaunchDryRunPrintsHumanPlan(t *testing.T) {
++	output, err := runCLI(t, t.TempDir(), "", nil, "launch", "codex", "--dry-run", "--model", "cli-model")
++	if err != nil {
++		t.Fatalf("dry run: %v\n%s", err, output)
++	}
++	for _, want := range []string{"codex", "cli-model", "127.0.0.1:24115"} {
++		if !strings.Contains(string(output), want) {
++			t.Fatalf("human plan missing %q:\n%s", want, output)
++		}
++	}
++}
++
++func TestLaunchDryRunJSONPrintsPlan(t *testing.T) {
++	output, err := runCLI(t, t.TempDir(), "", nil, "launch", "codex", "--dry-run", "--json", "--model", "json-model")
++	if err != nil {
++		t.Fatalf("JSON dry run: %v\n%s", err, output)
++	}
++	var plan launch.Plan
++	if err := json.Unmarshal(output, &plan); err != nil {
++		t.Fatalf("invalid plan JSON: %v\n%s", err, output)
++	}
++	if plan.Integration != "codex" || plan.Model != "json-model" || plan.Binary == "" || plan.Env == nil || plan.Files == nil {
++		t.Fatalf("incomplete JSON plan: %#v", plan)
++	}
++}
++
++func TestLaunchDryRunModelFlagOverridesEnvironment(t *testing.T) {
++	output, err := runCLI(t, t.TempDir(), "", []string{"OLLAMA_LAUNCH_MODEL=environment-model"}, "launch", "copilot", "--dry-run", "--json", "--model", "flag-model")
++	if err != nil {
++		t.Fatalf("dry run: %v\n%s", err, output)
++	}
++	var plan launch.Plan
++	if err := json.Unmarshal(output, &plan); err != nil {
++		t.Fatal(err)
++	}
++	if plan.Model != "flag-model" {
++		t.Fatalf("Model = %q", plan.Model)
++	}
++}
++
++func TestLaunchDryRunUsesEnvironmentModelFallback(t *testing.T) {
++	output, err := runCLI(t, t.TempDir(), "", []string{"OLLAMA_LAUNCH_MODEL=fallback-model"}, "launch", "claude", "--dry-run", "--json")
++	if err != nil {
++		t.Fatalf("dry run: %v\n%s", err, output)
++	}
++	var plan launch.Plan
++	if err := json.Unmarshal(output, &plan); err != nil {
++		t.Fatal(err)
++	}
++	if plan.Model != "fallback-model" {
++		t.Fatalf("Model = %q", plan.Model)
++	}
++}
++
++func TestLaunchDryRunDoesNotExecuteTarget(t *testing.T) {
++	home := t.TempDir()
++	marker := filepath.Join(home, "executed")
++	body := "#!/bin/sh\ntouch \"$EXEC_MARKER\"\n"
++	output, err := runCLI(t, home, body, []string{"EXEC_MARKER=" + marker}, "launch", "codex", "--dry-run", "--model", "no-exec-model")
++	if err != nil {
++		t.Fatalf("dry run: %v\n%s", err, output)
++	}
++	if _, err := os.Stat(marker); !os.IsNotExist(err) {
++		t.Fatalf("dry run executed target: %v", err)
++	}
++}
++
++func TestLaunchDryRunDoesNotCreateMissingHome(t *testing.T) {
++	home := filepath.Join(t.TempDir(), "missing-home")
++	output, err := runCLI(t, home, "", nil, "launch", "droid", "--dry-run", "--model", "no-write-model")
++	if err != nil {
++		t.Fatalf("dry run: %v\n%s", err, output)
++	}
++	if _, err := os.Stat(home); !os.IsNotExist(err) {
++		t.Fatalf("dry run created home: %v", err)
++	}
++}
++
++func TestLaunchDryRunExistingConfigReportsMutationWithoutChangingFile(t *testing.T) {
++	home := t.TempDir()
++	path := filepath.Join(home, ".factory", "settings.json")
++	seed := []byte(`{"theme":"dark"}`)
++	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(path, seed, 0o600); err != nil {
++		t.Fatal(err)
++	}
++	output, err := runCLI(t, home, "", nil, "launch", "droid", "--dry-run", "--json", "--model", "dry-existing-model")
++	if err != nil {
++		t.Fatalf("dry run: %v\n%s", err, output)
++	}
++	var plan launch.Plan
++	if err := json.Unmarshal(output, &plan); err != nil {
++		t.Fatal(err)
++	}
++	if len(plan.Files) == 0 || plan.Files[0].Action != launch.FileMerge {
++		t.Fatalf("expected merge action: %#v", plan.Files)
++	}
++	got, err := os.ReadFile(path)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if string(got) != string(seed) {
++		t.Fatalf("dry run changed config from %q to %q", seed, got)
++	}
++}
++
++func TestLaunchDryRunUnknownIntegrationFails(t *testing.T) {
++	output, err := runCLI(t, t.TempDir(), "", nil, "launch", "not-a-real-integration", "--dry-run", "--model", "m")
++	if err == nil {
++		t.Fatalf("unknown integration succeeded:\n%s", output)
++	}
++}
+diff --git a/hidden/launchenv/launch_model_test.go b/hidden/launchenv/launch_model_test.go
+new file mode 100644
+index 0000000..297ca3c
+--- /dev/null
++++ b/hidden/launchenv/launch_model_test.go
+@@ -0,0 +1,48 @@
++package launchenv_test
++
++import (
++	"testing"
++
++	"github.com/ollama/ollama/envconfig"
++)
++
++func TestLaunchModelReturnsConfiguredValue(t *testing.T) {
++	t.Setenv("OLLAMA_LAUNCH_MODEL", "qwen3:8b")
++	if got := envconfig.LaunchModel(); got != "qwen3:8b" {
++		t.Fatalf("LaunchModel = %q", got)
++	}
++}
++
++func TestLaunchModelReturnsEmptyWhenUnset(t *testing.T) {
++	t.Setenv("OLLAMA_LAUNCH_MODEL", "")
++	if got := envconfig.LaunchModel(); got != "" {
++		t.Fatalf("LaunchModel = %q, want empty", got)
++	}
++}
++
++func TestLaunchModelObservesEnvironmentChanges(t *testing.T) {
++	t.Setenv("OLLAMA_LAUNCH_MODEL", "first")
++	if got := envconfig.LaunchModel(); got != "first" {
++		t.Fatalf("first value = %q", got)
++	}
++	t.Setenv("OLLAMA_LAUNCH_MODEL", "second")
++	if got := envconfig.LaunchModel(); got != "second" {
++		t.Fatalf("second value = %q", got)
++	}
++}
++
++func TestLaunchModelPreservesQualifiedModelName(t *testing.T) {
++	want := "registry.example/team/model:42b"
++	t.Setenv("OLLAMA_LAUNCH_MODEL", want)
++	if got := envconfig.LaunchModel(); got != want {
++		t.Fatalf("LaunchModel = %q, want %q", got, want)
++	}
++}
++
++func TestLaunchModelUsesExactUppercaseVariable(t *testing.T) {
++	t.Setenv("ollama_launch_model", "wrong")
++	t.Setenv("OLLAMA_LAUNCH_MODEL", "right")
++	if got := envconfig.LaunchModel(); got != "right" {
++		t.Fatalf("LaunchModel = %q", got)
++	}
++}
+diff --git a/hidden/launchplan/actions_test.go b/hidden/launchplan/actions_test.go
+new file mode 100644
+index 0000000..f89f9c6
+--- /dev/null
++++ b/hidden/launchplan/actions_test.go
+@@ -0,0 +1,128 @@
++package launchplan_test
++
++import (
++	"context"
++	"os"
++	"path/filepath"
++	"testing"
++
++	"github.com/ollama/ollama/cmd/launch"
++)
++
++func TestMissingCodexFilesReportCreate(t *testing.T) {
++	home := filepath.Join(t.TempDir(), "missing-home")
++	plan := buildPlan(t, "codex", home, "action-model", testHost)
++	if len(plan.Files) == 0 {
++		t.Fatal("codex plan contains no files")
++	}
++	for _, file := range plan.Files {
++		if file.Action != launch.FileCreate {
++			t.Fatalf("%q action = %q, want create", file.Path, file.Action)
++		}
++	}
++}
++
++func TestBuildPlanDoesNotCreateMissingHome(t *testing.T) {
++	home := filepath.Join(t.TempDir(), "missing-home")
++	buildPlan(t, "codex", home, "no-write-model", testHost)
++	if _, err := os.Stat(home); !os.IsNotExist(err) {
++		t.Fatalf("BuildPlan created home %q: %v", home, err)
++	}
++}
++
++func TestBuildPlanDoesNotCreatePlannedDirectories(t *testing.T) {
++	home := filepath.Join(t.TempDir(), "absent")
++	plan := buildPlan(t, "droid", home, "no-directory-model", testHost)
++	for _, file := range plan.Files {
++		if _, err := os.Stat(filepath.Dir(file.Path)); !os.IsNotExist(err) {
++			t.Fatalf("BuildPlan created directory for %q: %v", file.Path, err)
++		}
++	}
++}
++
++func TestExistingIdenticalCodexFilesReportUnchanged(t *testing.T) {
++	home := t.TempDir()
++	initial := buildPlan(t, "codex", home, "same-model", testHost)
++	for _, file := range initial.Files {
++		if err := os.MkdirAll(filepath.Dir(file.Path), 0o755); err != nil {
++			t.Fatal(err)
++		}
++		if err := os.WriteFile(file.Path, []byte(file.Contents), file.Mode); err != nil {
++			t.Fatal(err)
++		}
++	}
++	plan := buildPlan(t, "codex", home, "same-model", testHost)
++	for _, file := range plan.Files {
++		if file.Action != launch.FileUnchanged {
++			t.Fatalf("%q action = %q, want unchanged", file.Path, file.Action)
++		}
++	}
++}
++
++func TestExistingDifferentCodexOwnedFileReportsOverwrite(t *testing.T) {
++	home := t.TempDir()
++	initial := buildPlan(t, "codex", home, "overwrite-model", testHost)
++	profile := findFile(t, initial, "ollama-launch.config.toml")
++	if err := os.MkdirAll(filepath.Dir(profile.Path), 0o755); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(profile.Path, []byte("model = \"old\"\n"), 0o644); err != nil {
++		t.Fatal(err)
++	}
++	plan := buildPlan(t, "codex", home, "overwrite-model", testHost)
++	got := findFile(t, plan, "ollama-launch.config.toml")
++	if got.Action != launch.FileOverwrite {
++		t.Fatalf("action = %q, want overwrite", got.Action)
++	}
++}
++
++func TestExistingDroidSettingsReportMerge(t *testing.T) {
++	home := t.TempDir()
++	path := filepath.Join(home, ".factory", "settings.json")
++	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(path, []byte(`{"theme":"dark"}`), 0o644); err != nil {
++		t.Fatal(err)
++	}
++	plan := buildPlan(t, "droid", home, "merge-model", testHost)
++	file := findFile(t, plan, "settings.json")
++	if file.Action != launch.FileMerge {
++		t.Fatalf("action = %q, want merge", file.Action)
++	}
++}
++
++func TestDryPlanningExistingFilePreservesBytes(t *testing.T) {
++	home := t.TempDir()
++	path := filepath.Join(home, ".factory", "settings.json")
++	seed := []byte(`{"theme":"sentinel","customModels":[]}`)
++	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(path, seed, 0o600); err != nil {
++		t.Fatal(err)
++	}
++	installFakeTools(t)
++	if _, err := launch.BuildPlan(context.Background(), "droid", launch.PlanOptions{Home: home, Host: testHost, Model: "dry-model"}); err != nil {
++		t.Fatal(err)
++	}
++	got, err := os.ReadFile(path)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if string(got) != string(seed) {
++		t.Fatalf("BuildPlan changed file from %q to %q", seed, got)
++	}
++}
++
++func TestPlannedFilesHaveFinalModeAndContents(t *testing.T) {
++	plan := buildPlan(t, "codex", t.TempDir(), "fields-model", testHost)
++	if len(plan.Files) == 0 {
++		t.Fatal("codex plan contains no files")
++	}
++	for _, file := range plan.Files {
++		if file.Path == "" || file.Contents == "" || file.Mode.Perm() == 0 || file.Action == "" {
++			t.Fatalf("incomplete planned file: %#v", file)
++		}
++	}
++}
+diff --git a/hidden/launchplan/apply_test.go b/hidden/launchplan/apply_test.go
+new file mode 100644
+index 0000000..56968b4
+--- /dev/null
++++ b/hidden/launchplan/apply_test.go
+@@ -0,0 +1,121 @@
++package launchplan_test
++
++import (
++	"context"
++	"os"
++	"path/filepath"
++	"strings"
++	"testing"
++
++	"github.com/ollama/ollama/cmd/launch"
++)
++
++func TestPlanApplyCreatesFileWithExactContents(t *testing.T) {
++	target := filepath.Join(t.TempDir(), "nested", "config.json")
++	binary := writeExecutable(t, "#!/bin/sh\nexit 0\n")
++	plan := launch.Plan{Binary: binary, Args: []string{}, Env: map[string]string{}, Files: []launch.PlannedFile{{Path: target, Contents: "planned bytes\n", Mode: 0o640, Action: launch.FileCreate}}}
++	if err := plan.Apply(context.Background()); err != nil {
++		t.Fatal(err)
++	}
++	got, err := os.ReadFile(target)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if string(got) != "planned bytes\n" {
++		t.Fatalf("contents = %q", got)
++	}
++}
++
++func TestPlanApplyUsesPlannedFileMode(t *testing.T) {
++	target := filepath.Join(t.TempDir(), "config.json")
++	plan := launch.Plan{Binary: writeExecutable(t, "#!/bin/sh\nexit 0\n"), Env: map[string]string{}, Files: []launch.PlannedFile{{Path: target, Contents: "x", Mode: 0o600, Action: launch.FileCreate}}}
++	if err := plan.Apply(context.Background()); err != nil {
++		t.Fatal(err)
++	}
++	info, err := os.Stat(target)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if info.Mode().Perm() != 0o600 {
++		t.Fatalf("mode = %o, want 600", info.Mode().Perm())
++	}
++}
++
++func TestPlanApplyOverwritesExistingFile(t *testing.T) {
++	target := filepath.Join(t.TempDir(), "config.json")
++	if err := os.WriteFile(target, []byte("old"), 0o644); err != nil {
++		t.Fatal(err)
++	}
++	plan := launch.Plan{Binary: writeExecutable(t, "#!/bin/sh\nexit 0\n"), Env: map[string]string{}, Files: []launch.PlannedFile{{Path: target, Contents: "new", Mode: 0o644, Action: launch.FileOverwrite}}}
++	if err := plan.Apply(context.Background()); err != nil {
++		t.Fatal(err)
++	}
++	got, err := os.ReadFile(target)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if string(got) != "new" {
++		t.Fatalf("contents = %q, want new", got)
++	}
++}
++
++func TestPlanApplyPassesArgumentsExactly(t *testing.T) {
++	output := filepath.Join(t.TempDir(), "args")
++	binary := writeExecutable(t, "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$PLAN_OUTPUT\"\n")
++	plan := launch.Plan{Binary: binary, Args: []string{"first", "two words", "third"}, Env: map[string]string{"PLAN_OUTPUT": output}, Files: []launch.PlannedFile{}}
++	if err := plan.Apply(context.Background()); err != nil {
++		t.Fatal(err)
++	}
++	got, err := os.ReadFile(output)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if string(got) != "first\ntwo words\nthird\n" {
++		t.Fatalf("arguments = %q", got)
++	}
++}
++
++func TestPlanApplyPassesEnvironmentExactly(t *testing.T) {
++	output := filepath.Join(t.TempDir(), "env")
++	binary := writeExecutable(t, "#!/bin/sh\nprintf '%s|%s' \"$PLAN_ALPHA\" \"$OLLAMA_HOST\" > \"$PLAN_OUTPUT\"\n")
++	plan := launch.Plan{Binary: binary, Env: map[string]string{"PLAN_ALPHA": "beta", "OLLAMA_HOST": testHost, "PLAN_OUTPUT": output}, Files: []launch.PlannedFile{}}
++	if err := plan.Apply(context.Background()); err != nil {
++		t.Fatal(err)
++	}
++	got, err := os.ReadFile(output)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if string(got) != "beta|"+testHost {
++		t.Fatalf("environment = %q", got)
++	}
++}
++
++func TestPlanApplyWritesFilesBeforeProcessStarts(t *testing.T) {
++	dir := t.TempDir()
++	target := filepath.Join(dir, "config")
++	output := filepath.Join(dir, "observed")
++	binary := writeExecutable(t, "#!/bin/sh\ncat \"$PLAN_TARGET\" > \"$PLAN_OUTPUT\"\n")
++	plan := launch.Plan{Binary: binary, Env: map[string]string{"PLAN_TARGET": target, "PLAN_OUTPUT": output}, Files: []launch.PlannedFile{{Path: target, Contents: "visible before exec", Mode: 0o600, Action: launch.FileCreate}}}
++	if err := plan.Apply(context.Background()); err != nil {
++		t.Fatal(err)
++	}
++	got, err := os.ReadFile(output)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if string(got) != "visible before exec" {
++		t.Fatalf("process observed %q", got)
++	}
++}
++
++func TestPlanApplyPropagatesProcessFailure(t *testing.T) {
++	plan := launch.Plan{Binary: writeExecutable(t, "#!/bin/sh\necho planned-failure >&2\nexit 23\n"), Env: map[string]string{}, Files: []launch.PlannedFile{}}
++	err := plan.Apply(context.Background())
++	if err == nil {
++		t.Fatal("Apply returned nil for failed process")
++	}
++	if !strings.Contains(err.Error(), "23") && !strings.Contains(err.Error(), "exit status") {
++		t.Fatalf("unexpected process error: %v", err)
++	}
++}
+diff --git a/hidden/launchplan/helpers_test.go b/hidden/launchplan/helpers_test.go
+new file mode 100644
+index 0000000..858e156
+--- /dev/null
++++ b/hidden/launchplan/helpers_test.go
+@@ -0,0 +1,66 @@
++package launchplan_test
++
++import (
++	"context"
++	"os"
++	"path/filepath"
++	"testing"
++
++	"github.com/ollama/ollama/cmd/launch"
++)
++
++const testHost = "http://127.0.0.1:22115"
++
++func installFakeTools(t *testing.T) string {
++	t.Helper()
++	dir := t.TempDir()
++	for _, name := range []string{
++		"chatgpt", "claude", "claude-desktop", "cline", "code", "codex", "copilot",
++		"droid", "hermes", "hermes-desktop", "kimi", "ollama", "omp", "openclaw",
++		"opencode", "pi", "pool", "qwen",
++	} {
++		path := filepath.Join(dir, name)
++		if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
++			t.Fatalf("write fake %s: %v", name, err)
++		}
++	}
++	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
++	return dir
++}
++
++func buildPlan(t *testing.T, name, home, model, host string) launch.Plan {
++	t.Helper()
++	installFakeTools(t)
++	plan, err := launch.BuildPlan(context.Background(), name, launch.PlanOptions{
++		Home: home,
++		Host: host,
++		Model: model,
++	})
++	if err != nil {
++		t.Fatalf("BuildPlan(%q): %v", name, err)
++	}
++	return plan
++}
++
++func findFile(t *testing.T, plan launch.Plan, suffix string) launch.PlannedFile {
++	t.Helper()
++	for _, file := range plan.Files {
++		if filepath.ToSlash(file.Path) == filepath.ToSlash(suffix) || filepath.Base(file.Path) == suffix {
++			return file
++		}
++		if len(file.Path) >= len(suffix) && filepath.ToSlash(file.Path[len(file.Path)-len(suffix):]) == filepath.ToSlash(suffix) {
++			return file
++		}
++	}
++	t.Fatalf("plan for %q has no file ending in %q: %#v", plan.Integration, suffix, plan.Files)
++	return launch.PlannedFile{}
++}
++
++func writeExecutable(t *testing.T, body string) string {
++	t.Helper()
++	path := filepath.Join(t.TempDir(), "planned-tool")
++	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
++		t.Fatal(err)
++	}
++	return path
++}
+diff --git a/hidden/launchplan/registry_test.go b/hidden/launchplan/registry_test.go
+new file mode 100644
+index 0000000..d5e1c17
+--- /dev/null
++++ b/hidden/launchplan/registry_test.go
+@@ -0,0 +1,94 @@
++package launchplan_test
++
++import (
++	"context"
++	"reflect"
++	"slices"
++	"strings"
++	"testing"
++
++	"github.com/ollama/ollama/cmd/launch"
++)
++
++func TestRegisteredIntegrationsNonEmpty(t *testing.T) {
++	if len(launch.RegisteredIntegrations()) == 0 {
++		t.Fatal("RegisteredIntegrations returned no integrations")
++	}
++}
++
++func TestRegisteredIntegrationsSorted(t *testing.T) {
++	got := launch.RegisteredIntegrations()
++	want := slices.Clone(got)
++	slices.Sort(want)
++	if !reflect.DeepEqual(got, want) {
++		t.Fatalf("RegisteredIntegrations = %v, want sorted %v", got, want)
++	}
++}
++
++func TestRegisteredIntegrationsUnique(t *testing.T) {
++	seen := map[string]bool{}
++	for _, name := range launch.RegisteredIntegrations() {
++		if seen[name] {
++			t.Fatalf("duplicate integration %q", name)
++		}
++		seen[name] = true
++	}
++}
++
++func TestRegisteredIntegrationsContainNoBlankNames(t *testing.T) {
++	for _, name := range launch.RegisteredIntegrations() {
++		if strings.TrimSpace(name) == "" {
++			t.Fatalf("blank integration in %v", launch.RegisteredIntegrations())
++		}
++	}
++}
++
++func TestRegisteredIntegrationsReturnsIndependentSlice(t *testing.T) {
++	first := launch.RegisteredIntegrations()
++	if len(first) == 0 {
++		t.Fatal("empty registry")
++	}
++	original := first[0]
++	first[0] = "mutated-hidden-test"
++	second := launch.RegisteredIntegrations()
++	if second[0] != original {
++		t.Fatalf("registry slice aliases caller mutation: %v", second)
++	}
++}
++
++func TestEveryRegisteredIntegrationBuildsCompletePlan(t *testing.T) {
++	installFakeTools(t)
++	for _, name := range launch.RegisteredIntegrations() {
++		home := t.TempDir()
++		plan, err := launch.BuildPlan(context.Background(), name, launch.PlanOptions{Home: home, Host: testHost, Model: "registry-model"})
++		if err != nil {
++			t.Fatalf("BuildPlan(%q): %v", name, err)
++		}
++		if plan.Integration != name {
++			t.Fatalf("BuildPlan(%q).Integration = %q", name, plan.Integration)
++		}
++		if strings.TrimSpace(plan.Binary) == "" {
++			t.Fatalf("BuildPlan(%q) returned empty Binary", name)
++		}
++		if plan.Model != "registry-model" {
++			t.Fatalf("BuildPlan(%q).Model = %q", name, plan.Model)
++		}
++		if plan.Env == nil || plan.Args == nil || plan.Files == nil {
++			t.Fatalf("BuildPlan(%q) returned nil collection: %#v", name, plan)
++		}
++	}
++}
++
++func TestBuildPlanUnknownIntegrationReturnsError(t *testing.T) {
++	_, err := launch.BuildPlan(context.Background(), "not-a-real-integration", launch.PlanOptions{Model: "m", Host: testHost})
++	if err == nil {
++		t.Fatal("BuildPlan returned nil error for unknown integration")
++	}
++}
++
++func TestBuildPlanEmptyIntegrationReturnsError(t *testing.T) {
++	_, err := launch.BuildPlan(context.Background(), "", launch.PlanOptions{Model: "m", Host: testHost})
++	if err == nil {
++		t.Fatal("BuildPlan returned nil error for empty integration")
++	}
++}
+diff --git a/hidden/launchplan/serialization_test.go b/hidden/launchplan/serialization_test.go
+new file mode 100644
+index 0000000..d0e9ece
+--- /dev/null
++++ b/hidden/launchplan/serialization_test.go
+@@ -0,0 +1,143 @@
++package launchplan_test
++
++import (
++	"encoding/json"
++	"io/fs"
++	"reflect"
++	"strings"
++	"testing"
++
++	"github.com/ollama/ollama/cmd/launch"
++)
++
++func samplePlan() launch.Plan {
++	return launch.Plan{
++		Integration: "codex",
++		Binary: "/tmp/codex",
++		Args: []string{"--model", "sample"},
++		Env: map[string]string{"Z_KEY": "z", "A_KEY": "a", "M_KEY": "m"},
++		Model: "sample",
++		Files: []launch.PlannedFile{
++			{Path: "/tmp/a.json", Contents: "a", Mode: fs.FileMode(0o644), Action: launch.FileCreate},
++			{Path: "/tmp/z.json", Contents: "z", Mode: fs.FileMode(0o600), Action: launch.FileOverwrite},
++		},
++		Notes: []string{"sample note"},
++	}
++}
++
++func TestPlanJSONRoundTrips(t *testing.T) {
++	want := samplePlan()
++	data, err := want.JSON()
++	if err != nil {
++		t.Fatal(err)
++	}
++	var got launch.Plan
++	if err := json.Unmarshal(data, &got); err != nil {
++		t.Fatal(err)
++	}
++	if !reflect.DeepEqual(got, want) {
++		t.Fatalf("round trip mismatch\n got: %#v\nwant: %#v", got, want)
++	}
++}
++
++func TestPlanJSONDeterministicRepeatedCalls(t *testing.T) {
++	plan := samplePlan()
++	first, err := plan.JSON()
++	if err != nil {
++		t.Fatal(err)
++	}
++	for i := 0; i < 25; i++ {
++		next, err := plan.JSON()
++		if err != nil {
++			t.Fatal(err)
++		}
++		if string(next) != string(first) {
++			t.Fatalf("JSON changed between calls:\n%s\n%s", first, next)
++		}
++	}
++}
++
++func TestPlanJSONEnvironmentKeysSorted(t *testing.T) {
++	data, err := samplePlan().JSON()
++	if err != nil {
++		t.Fatal(err)
++	}
++	text := string(data)
++	a := strings.Index(text, "A_KEY")
++	m := strings.Index(text, "M_KEY")
++	z := strings.Index(text, "Z_KEY")
++	if !(a >= 0 && a < m && m < z) {
++		t.Fatalf("environment keys are not sorted: %s", text)
++	}
++}
++
++func TestBuildPlanFilesSortedByPath(t *testing.T) {
++	for _, name := range launch.RegisteredIntegrations() {
++		plan := buildPlan(t, name, t.TempDir(), "sort-model", testHost)
++		for i := 1; i < len(plan.Files); i++ {
++			if plan.Files[i-1].Path > plan.Files[i].Path {
++				t.Fatalf("%s files not sorted: %q before %q", name, plan.Files[i-1].Path, plan.Files[i].Path)
++			}
++		}
++	}
++}
++
++func TestPlanJSONContainsRequiredPublicFields(t *testing.T) {
++	data, err := samplePlan().JSON()
++	if err != nil {
++		t.Fatal(err)
++	}
++	var object map[string]json.RawMessage
++	if err := json.Unmarshal(data, &object); err != nil {
++		t.Fatal(err)
++	}
++	for _, key := range []string{"integration", "binary", "args", "env", "model", "files"} {
++		if _, ok := object[key]; !ok {
++			t.Fatalf("JSON missing %q: %s", key, data)
++		}
++	}
++}
++
++func TestPlanJSONOmitsEmptyNotes(t *testing.T) {
++	plan := samplePlan()
++	plan.Notes = nil
++	data, err := plan.JSON()
++	if err != nil {
++		t.Fatal(err)
++	}
++	var object map[string]json.RawMessage
++	if err := json.Unmarshal(data, &object); err != nil {
++		t.Fatal(err)
++	}
++	if _, ok := object["notes"]; ok {
++		t.Fatalf("empty notes were not omitted: %s", data)
++	}
++}
++
++func TestPlanRenderContainsExecutionDetails(t *testing.T) {
++	text := samplePlan().Render()
++	for _, want := range []string{"codex", "/tmp/codex", "sample", "A_KEY", "a"} {
++		if !strings.Contains(text, want) {
++			t.Fatalf("Render missing %q:\n%s", want, text)
++		}
++	}
++}
++
++func TestPlanRenderContainsFileActionsAndContents(t *testing.T) {
++	text := samplePlan().Render()
++	for _, want := range []string{"/tmp/a.json", "/tmp/z.json", "create", "overwrite", "a", "z"} {
++		if !strings.Contains(text, want) {
++			t.Fatalf("Render missing %q:\n%s", want, text)
++		}
++	}
++}
++
++func TestPlanRenderDeterministicRepeatedCalls(t *testing.T) {
++	plan := samplePlan()
++	first := plan.Render()
++	for i := 0; i < 25; i++ {
++		if next := plan.Render(); next != first {
++			t.Fatalf("Render changed between calls:\n%s\n%s", first, next)
++		}
++	}
++}

@@ -1,0 +1,44 @@
+schema_version = "1.3"
+artifacts = ["/logs/artifacts"]
+
+[[verifier.collect]]
+command = "cd /app && git add -A && git diff --binary --cached 8359e760be499fd8e804242e7606d81dde931abb > /logs/artifacts/model.patch"
+service = "main"
+
+[task]
+name = "deepswe/task-0003"
+description = "Spend budget guardrails: per-scope USD budgets with threshold events, redaction-safe telemetry, and CLI/footer surfacing"
+authors = []
+keywords = []
+
+[metadata]
+task_id = "spend-budget-guardrails-per-scope-usd-budget-0003"
+display_title = "Spend budget guardrails: per-scope USD budgets with threshold events, redaction-safe telemetry, and CLI/footer surfacing"
+display_description = "Hermes tracks token usage and translates it to money through `agent/usage_pricing.py` and `agent/credits_tracker.py`, and it renders spend in `agent/billing_view.py`, `agent/display.py`, and the gateway footer. Today there is no way for an operator to cap how much a session (or a calendar day) is allowed to spend, and no structured signal when spend crosses a threshold. Users running the agent unattended on a VPS or from a chat platform want a budget they can set once and have the agent honor. A"
+original_title = "Spend budget guardrails: per-scope USD budgets with threshold events, redaction-safe telemetry, and CLI/footer surfacing"
+category = "feature_request"
+language = "python"
+repository = "NousResearch/hermes-agent"
+repository_url = "https://github.com/NousResearch/hermes-agent.git"
+base_commit_hash = "8359e760be499fd8e804242e7606d81dde931abb"
+
+[verifier]
+network_mode = "public"
+environment_mode = "shared"
+timeout_sec = 1800.0
+
+[verifier.env]
+[agent]
+network_mode = "public"
+timeout_sec = 5400.0
+
+[environment]
+build_timeout_sec = 1800.0
+cpus = 2
+memory_mb = 8192
+storage_mb = 20480
+gpus = 0
+mcp_servers = []
+
+[environment.env]
+[solution.env]

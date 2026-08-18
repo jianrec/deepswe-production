@@ -1,0 +1,7 @@
+{
+  "mode": "remote-pinned-checkout",
+  "repository": "openai/codex",
+  "base_commit_hash": "4ee41929eaf4fc1e5662c9b4befd05230688ca62",
+  "cache_path": "workspaces/repositories/openai__codex",
+  "remote_fetch_in_dockerfile": true
+}

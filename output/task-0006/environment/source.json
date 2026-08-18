@@ -1,0 +1,7 @@
+{
+  "mode": "remote-pinned-checkout",
+  "repository": "pmndrs/zustand",
+  "base_commit_hash": "beca84e600e4e250f6b244d22878e72948f331c7",
+  "cache_path": "workspaces/repositories/pmndrs__zustand",
+  "remote_fetch_in_dockerfile": true
+}

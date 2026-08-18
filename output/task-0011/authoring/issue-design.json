@@ -1,0 +1,172 @@
+{
+  "title": "Add a first-party `computed` middleware and `useComputed` React hook for derived, memoized store state",
+  "task_id_slug": "add-a-first-party-computed-middleware-and-us-0011",
+  "issue": "Zustand ships middleware for persistence, immer, devtools and subscribeWithSelector, but has no first-party way to express derived (computed) state. Users repeatedly re-derive values inside selectors, which recomputes on every render and loses referential stability, or they hand-roll subscriptions that duplicate base state. We want a supported, composable solution that lives at both the store layer and the React layer.\n\nDeliver two coordinated pieces sharing one memoization core:\n\n1) A vanilla `computed` middleware exported from `zustand/middleware`. It wraps a state creator with a `compute(state) => C` function whose result is merged into the store state so computed keys are visible through `getState()`, selectors, and every existing consumer (`useStore`, `useStoreWithEqualityFn`). Computed keys are recomputed automatically whenever base state changes and are treated as read-only: if a user writes a computed key directly it must be recomputed and overwritten. Recomputation must run inside a single `setState` cycle so subscribers are notified exactly once per update (never twice). Each computed value must keep referential stability when its recomputed result is equal under the configured equality function (default `Object.is`), so downstream selectors and React components do not re-render spuriously. An optional `keys` list restricts which base-state changes trigger recomputation.\n\n2) A `useComputed` React hook (importable from `zustand`) that derives a value from a store inside a component, memoizing across renders with an equality function (default shallow) so a component only re-renders when the derived output actually changes. It must be built on the same subscribe/getState contract used by `useStore` and be concurrent-safe via `useSyncExternalStore`.\n\nCompatibility requirements: existing public exports and behavior must not change; `pnpm test:spec` (214 tests) must stay green. The middleware must compose with `immer`, `persist`, `devtools`, `subscribeWithSelector`, and `combine`, in any order, and must respect the `replace` flag of `setState`. Computed keys must not be persisted unless the user's `partialize` includes them. Type inference must expose computed keys in selector state and in `getState()` for both `create` and `createStore`. Server rendering (`getInitialState`) must include computed values. The memoization helper must be shared between the middleware and the hook rather than duplicated.",
+  "acceptance_criteria": [
+    "`computed(initializer, compute, options?)` is exported from `zustand/middleware` and merges the result of `compute(state)` into store state, visible via `getState()` and any selector.",
+    "Computed values recompute automatically after every relevant `setState`, and the store notifies subscribers exactly once per update (no double notification caused by recomputation).",
+    "Each computed value retains its previous reference when the recomputed result is equal under the configured `equalityFn` (default `Object.is`).",
+    "Computed keys are read-only: a `setState` that writes a computed key is overridden by the recomputed value; the `replace: true` overload still re-merges computed keys.",
+    "`options.keys` limits recomputation so it only runs when one of the listed base-state keys changes (shallow compared); omitting it recomputes on every update.",
+    "`getInitialState()` returns state that already includes computed values so SSR hydration is consistent.",
+    "`useComputed(api, compute, equalityFn?)` is importable from `zustand`, derives a value via `useSyncExternalStore`, and only triggers a re-render when the derived output changes under the equality function (default shallow).",
+    "`computed` composes with `immer`, `persist`, `devtools`, `subscribeWithSelector`, and `combine` in any order without runtime errors, and its store mutator exposes computed keys in TypeScript selector/getState types.",
+    "Computed keys are excluded from persistence unless explicitly included by the user's `partialize`.",
+    "All 214 pre-existing tests under `pnpm test:spec` continue to pass with no changes to existing public API signatures."
+  ],
+  "public_api_contract": [
+    "export function computed<T, C extends object, Mps extends [StoreMutatorIdentifier, unknown][] = [], Mcs extends [StoreMutatorIdentifier, unknown][] = [], U = T>(initializer: StateCreator<T, [...Mps, ['zustand/computed', C]], Mcs, U>, compute: (state: T) => C, options?: ComputedOptions<C>): StateCreator<Write<T & U, C>, Mps, [['zustand/computed', C], ...Mcs]> — exported from 'zustand/middleware'",
+    "export interface ComputedOptions<C extends object> { equalityFn?: (a: C[keyof C], b: C[keyof C]) => boolean; keys?: (keyof C)[] } — exported from 'zustand/middleware'",
+    "StoreMutators augmentation: interface StoreMutators<S, A> { 'zustand/computed': WithComputed<S, A> } declared via `declare module '../vanilla'` inside src/middleware/computed.ts, where WithComputed<S, A> writes computed keys A onto getState/getInitialState/subscribe state and preserves setState overloads",
+    "export function useComputed<S extends { getState: () => unknown; getInitialState: () => unknown; subscribe: (listener: (state: unknown) => void) => () => void }, U>(api: S, compute: (state: ExtractState<S>) => U, equalityFn?: (a: U, b: U) => boolean): U — importable from 'zustand'",
+    "export { useComputed } re-exported from a new module src/computed.ts alongside `import { computed } from 'zustand/middleware'` (main-package import path `import { useComputed } from 'zustand'` must resolve)",
+    "Default equality for useComputed is the existing shallow implementation exported by src/vanilla/shallow.ts (`shallow`); default equality for computed values is Object.is"
+  ],
+  "pr_chain": [
+    {
+      "stage": "1-memoization-core",
+      "depends_on": [],
+      "modules": [
+        "vanilla",
+        "shallow"
+      ],
+      "files": [
+        "src/vanilla/shallow.ts",
+        "src/vanilla.ts"
+      ],
+      "behavior": "Add a small internal per-key memoization helper (createComputeMemo) that, given a compute function and an equality function, produces a merger that recomputes derived values and preserves references for unchanged results. Reuse the existing `shallow` function for object comparison. Expose only internal types needed by the middleware and hook; no change to existing public vanilla API surface or its runtime behavior."
+    },
+    {
+      "stage": "2-computed-middleware",
+      "depends_on": [
+        "1-memoization-core"
+      ],
+      "modules": [
+        "middleware"
+      ],
+      "files": [
+        "src/middleware/computed.ts",
+        "src/middleware.ts",
+        "src/types.d.ts"
+      ],
+      "behavior": "Implement the `computed` middleware: wrap the store's setState so that after each base update it recomputes derived values (respecting options.keys and options.equalityFn), merges them read-only into the next state, and notifies subscribers once. Seed computed values into the initial state so getState/getInitialState include them. Declare the 'zustand/computed' StoreMutators entry and export `computed` and `ComputedOptions` from src/middleware.ts. Handle replace:true, function updaters, and object updaters."
+    },
+    {
+      "stage": "3-react-hook",
+      "depends_on": [
+        "1-memoization-core"
+      ],
+      "modules": [
+        "react",
+        "shallow"
+      ],
+      "files": [
+        "src/react/computed.ts",
+        "src/react.ts"
+      ],
+      "behavior": "Implement `useComputed(api, compute, equalityFn = shallow)` on top of useSyncExternalStore, memoizing the derived value between renders and only producing a new reference when the equality check fails. Re-export `useComputed` from src/react.ts so it is available from the main `zustand` entry."
+    },
+    {
+      "stage": "4-exports-and-composition",
+      "depends_on": [
+        "2-computed-middleware",
+        "3-react-hook"
+      ],
+      "modules": [
+        "root",
+        "react"
+      ],
+      "files": [
+        "src/computed.ts",
+        "src/index.ts"
+      ],
+      "behavior": "Add src/computed.ts mirroring src/shallow.ts to co-locate `computed`/`useComputed` re-exports, ensure src/index.ts surfaces `useComputed`, and verify composition with immer/persist/devtools/subscribeWithSelector/combine plus persist partialize exclusion of computed keys. No breaking changes to existing exports."
+    }
+  ],
+  "affected_source_files": [
+    "src/middleware/computed.ts",
+    "src/middleware.ts",
+    "src/types.d.ts",
+    "src/react/computed.ts",
+    "src/react.ts",
+    "src/computed.ts",
+    "src/vanilla.ts",
+    "src/vanilla/shallow.ts",
+    "src/index.ts"
+  ],
+  "module_count": 5,
+  "feature_test_plan": [
+    "computed merges compute() output into getState() for vanilla createStore and for create().",
+    "computed values recompute after set with a function updater and after set with an object updater.",
+    "subscribers are notified exactly once per setState even though recomputation runs (spy on listener call count).",
+    "referential stability: computed value keeps the same object reference when recompute yields an equal result under Object.is / configured equalityFn.",
+    "read-only guarantee: writing a computed key via setState is overridden by the recomputed value.",
+    "replace:true still re-merges computed keys onto the replaced base state.",
+    "options.keys restricts recomputation to changes in listed base keys (compute spy not called when unrelated key changes).",
+    "getInitialState() includes computed values (SSR-shaped assertion).",
+    "useComputed returns the derived value and re-renders only when the derived output changes (render-count assertions).",
+    "useComputed default shallow equality prevents re-render for shallow-equal objects; custom equalityFn overrides it.",
+    "composition: computed under immer, over immer, with persist, with devtools, with subscribeWithSelector, with combine (order permutations).",
+    "persist does not store computed keys unless partialize includes them (assert serialized payload).",
+    "type-level tests (expectTypeOf) confirm computed keys appear in selector state and getState() for both create and createStore."
+  ],
+  "regression_test_plan": [
+    "Run the full existing suite (basic, devtools, immer, persistAsync, persistSync, shallow, ssr, subscribe, middlewareTypes, types, vanilla/*) unchanged to confirm no public API drift.",
+    "Property test: for random sequences of setState (function and object updaters, with/without replace), final getState() equals base-merge then compute-merge, and computed keys always equal compute(base).",
+    "Property test: subscriber notification count equals number of state-changing setState calls (no extra notifications from recomputation).",
+    "Property test: unchanged computed outputs preserve reference across arbitrary update sequences under both Object.is and shallow equality.",
+    "Property test: options.keys correctly gates recomputation for randomized key-change sets.",
+    "Property test: useComputed render count is bounded by the number of distinct derived outputs across randomized store update streams.",
+    "Regression: subscribeWithSelector fireImmediately and equalityFn behavior is unchanged when computed is present.",
+    "Regression: persist rehydration and version/migrate paths still work with computed keys excluded from storage.",
+    "Regression: devtools action dispatch and setState action labels still function when wrapped by computed."
+  ],
+  "difficulty_card": {
+    "difficulty_score": 3.4,
+    "exploration_points": 4,
+    "cross_module_points": 4,
+    "integration_points": 4,
+    "regression_risk_points": 4,
+    "estimated_changed_lines": 660,
+    "estimated_changed_files": 9
+  },
+  "reference_implementation_plan": [
+    "In src/vanilla/shallow.ts, add an internal createComputeMemo(compute, equalityFn) that stores the previous computed object and returns a function producing a merged computed object where each key reuses the prior reference if equal; import and reuse the existing shallow for default object comparison.",
+    "In src/vanilla.ts, export the minimal internal types (ComputeMemo result shape) needed by middleware/hook without altering StoreApi or createStore runtime.",
+    "In src/middleware/computed.ts, define WithComputed<S, A>, ComputedOptions<C>, the Computed function type with the 'zustand/computed' mutator, and computedImpl that: wraps api.setState to run base update, recompute via the memo (gated by options.keys shallow-diffing tracked base keys), merge computed keys read-only, and call the original set once; seed computed values into the initial returned state; declare the StoreMutators module augmentation.",
+    "In src/middleware.ts, export { computed, type ComputedOptions } from './middleware/computed.ts'.",
+    "In src/types.d.ts, add any shared exported type aliases (Write helper reuse) referenced by the middleware's public signature.",
+    "In src/react/computed.ts, implement useComputed(api, compute, equalityFn = shallow) using React.useRef to hold the last derived value and React.useSyncExternalStore(api.subscribe, snapshot, serverSnapshot) where snapshot recomputes and returns the cached reference when equalityFn passes.",
+    "In src/react.ts, re-export useComputed so it is reachable from the main entry.",
+    "Create src/computed.ts re-exporting { computed } and { useComputed }, mirroring src/shallow.ts.",
+    "In src/index.ts, ensure useComputed is surfaced through the react export barrel.",
+    "Add tests/computed.test.tsx and tests/vanilla/computed.test.ts covering the feature and type plans; verify composition and persist exclusion."
+  ],
+  "build_and_test_commands": [
+    "pnpm install --offline",
+    "pnpm test:spec"
+  ],
+  "repository": {
+    "url": "https://github.com/pmndrs/zustand",
+    "full_name": "pmndrs/zustand",
+    "language": "typescript",
+    "base_commit": "beca84e600e4e250f6b244d22878e72948f331c7",
+    "stars": 58561,
+    "license": "MIT",
+    "runtime_preflight": {
+      "base_commit_hash": "beca84e600e4e250f6b244d22878e72948f331c7",
+      "command": "pnpm test:spec",
+      "environment": "Linux container, runtime network disabled",
+      "excluded_test_ids": [],
+      "image": "deepswe-preflight-zustand:beca84e600e4",
+      "image_id": "sha256:583eb6a1c8339641869bbcbf54e513089f418b6af12e9dac8f9e9fb2b309eda6",
+      "network_mode": "no-network",
+      "passed_at": "2026-08-12T03:45:44.837973+00:00",
+      "status": "passed",
+      "test_count": 214
+    }
+  },
+  "slot": "task-0011",
+  "author_model": "claude-opus-4-8",
+  "pipeline_version": "2.0"
+}

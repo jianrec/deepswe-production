@@ -1,0 +1,80 @@
+{
+  "`computed(initializer, compute, options?)` is exported from `zustand/middleware` and merges the result of `compute(state)` into store state, visible via `getState()` and any selector.": [
+    "computed exports middleware and exposes initial computed values",
+    "computed recomputes after an initializer action",
+    "computed recomputes after an external partial setState",
+    "computed publishes every key returned by compute",
+    "computed composes outside subscribeWithSelector"
+  ],
+  "Computed values recompute automatically after every relevant `setState`, and the store notifies subscribers exactly once per update (no double notification caused by recomputation).": [
+    "computed recomputes after an external functional setState",
+    "computed notifies exactly once for external setState",
+    "computed notifies exactly once for an initializer action",
+    "computed notifies exactly once for replace true",
+    "computed subscribers receive the final computed state",
+    "computed subscribers receive the prior computed state"
+  ],
+  "Each computed value retains its previous reference when the recomputed result is equal under the configured `equalityFn` (default `Object.is`).": [
+    "computed preserves each equal value with a custom equality function",
+    "computed defaults to Object.is for value memoization"
+  ],
+  "Computed keys are read-only: a `setState` that writes a computed key is overridden by the recomputed value; the `replace: true` overload still re-merges computed keys.": [
+    "computed overwrites a direct partial write to a computed key",
+    "computed overwrites a direct functional write to a computed key",
+    "computed re-merges computed keys for replace true",
+    "computed keys cannot allow a forged computed value to survive",
+    "computed initial state overwrites initializer-provided computed keys"
+  ],
+  "`options.keys` limits recomputation so it only runs when one of the listed base-state keys changes (shallow compared); omitting it recomputes on every update.": [
+    "computed keys option computes the initial value",
+    "computed keys option skips an unrelated base-state update",
+    "computed keys option recomputes a listed base-state update",
+    "computed keys compare listed values with Object.is",
+    "computed keys detect changed object references",
+    "computed keys support multiple relevant base-state keys"
+  ],
+  "`getInitialState()` returns state that already includes computed values so SSR hydration is consistent.": [
+    "computed includes derived values in getInitialState",
+    "computed getInitialState remains unchanged after updates",
+    "computed getInitialState retains the initial computed reference",
+    "useComputed uses getInitialState for server rendering"
+  ],
+  "`useComputed(api, compute, equalityFn?)` is importable from `zustand`, derives a value via `useSyncExternalStore`, and only triggers a re-render when the derived output changes under the equality function (default shallow).": [
+    "useComputed is importable from zustand and derives store state",
+    "useComputed updates when its derived primitive changes",
+    "useComputed defaults to shallow equality for object outputs",
+    "useComputed re-renders when a shallow object field changes",
+    "useComputed honors a custom equality function",
+    "useComputed accepts a bound store api",
+    "useComputed updates when the compute closure changes",
+    "useComputed unsubscribes when the component unmounts",
+    "useComputed remains usable in React StrictMode"
+  ],
+  "`computed` composes with `immer`, `persist`, `devtools`, `subscribeWithSelector`, and `combine` in any order without runtime errors, and its store mutator exposes computed keys in TypeScript selector/getState types.": [
+    "computed composes outside immer",
+    "computed composes inside immer",
+    "computed composes outside devtools",
+    "computed composes inside devtools",
+    "computed composes outside subscribeWithSelector",
+    "computed composes inside subscribeWithSelector",
+    "computed composes outside combine",
+    "computed composes inside combine-produced state creators",
+    "computed outside persist excludes computed keys by default",
+    "computed inside persist excludes computed keys by default",
+    "computed types expose computed keys through getState",
+    "computed types expose computed keys through getInitialState",
+    "computed types expose computed keys to subscribe listeners",
+    "computed preserves usable setState overloads for base state",
+    "useComputed infers state and output from the store api",
+    "computed mutator changes ExtractState to include derived keys"
+  ],
+  "Computed keys are excluded from persistence unless explicitly included by the user's `partialize`.": [
+    "computed outside persist excludes computed keys by default",
+    "computed inside persist excludes computed keys by default",
+    "computed persistence includes a computed key when partialize selects it",
+    "computed recomputes hydrated persisted base state"
+  ],
+  "All 214 pre-existing tests under `pnpm test:spec` continue to pass with no changes to existing public API signatures.": [
+    "regression_command selects all 214 pinned public tests"
+  ]
+}

@@ -1,0 +1,608 @@
+diff --git a/tests/history.controls.test.ts b/tests/history.controls.test.ts
+new file mode 100644
+index 0000000..cd7d54f
+--- /dev/null
++++ b/tests/history.controls.test.ts
+@@ -0,0 +1,77 @@
++import { describe, expect, it, vi } from 'vitest'
++import { history } from 'zustand/middleware'
++import { createStore } from 'zustand/vanilla'
++
++const makeStore = (limit?: number) => createStore(history(() => ({ count: 0 }), { limit }))
++
++describe('history controls and limits', () => {
++  it('history_clear_empties_both_stacks', () => {
++    const store = makeStore()
++    store.setState({ count: 1 })
++    store.setState({ count: 2 })
++    store.temporal.getState().undo()
++    store.temporal.getState().clear()
++    expect(store.temporal.getState().pastStates).toEqual([])
++    expect(store.temporal.getState().futureStates).toEqual([])
++  })
++
++  it('history_clear_does_not_change_main_state', () => {
++    const store = makeStore()
++    store.setState({ count: 7 })
++    store.temporal.getState().clear()
++    expect(store.getState().count).toBe(7)
++  })
++
++  it('history_pause_disables_tracking', () => {
++    const store = makeStore()
++    store.temporal.getState().pause()
++    expect(store.temporal.getState().isTracking).toBe(false)
++    store.setState({ count: 3 })
++    expect(store.temporal.getState().pastStates).toEqual([])
++  })
++
++  it('history_resume_reenables_tracking_from_current_state', () => {
++    const store = makeStore()
++    store.temporal.getState().pause()
++    store.setState({ count: 3 })
++    store.temporal.getState().resume()
++    store.setState({ count: 4 })
++    expect(store.temporal.getState().isTracking).toBe(true)
++    expect(store.temporal.getState().pastStates.map((state) => state.count)).toEqual([3])
++  })
++
++  it('history_limit_discards_oldest_entries_first', () => {
++    const store = makeStore(2)
++    store.setState({ count: 1 })
++    store.setState({ count: 2 })
++    store.setState({ count: 3 })
++    expect(store.temporal.getState().pastStates.map((state) => state.count)).toEqual([1, 2])
++  })
++
++  it('history_limit_one_keeps_only_latest_past_state', () => {
++    const store = makeStore(1)
++    store.setState({ count: 1 })
++    store.setState({ count: 2 })
++    expect(store.temporal.getState().pastStates).toHaveLength(1)
++    expect(store.temporal.getState().pastStates[0]?.count).toBe(1)
++  })
++
++  it('history_without_limit_keeps_unbounded_entries', () => {
++    const store = makeStore()
++    for (let count = 1; count <= 25; count += 1) store.setState({ count })
++    expect(store.temporal.getState().pastStates).toHaveLength(25)
++    expect(store.temporal.getState().pastStates[0]?.count).toBe(0)
++    expect(store.temporal.getState().pastStates[24]?.count).toBe(24)
++  })
++
++  it('history_empty_undo_redo_and_clear_do_not_notify_main_store', () => {
++    const store = makeStore()
++    const listener = vi.fn()
++    store.subscribe(listener)
++    store.temporal.getState().undo()
++    store.temporal.getState().redo()
++    store.temporal.getState().clear()
++    expect(listener).not.toHaveBeenCalled()
++    expect(store.getState().count).toBe(0)
++  })
++})
+diff --git a/tests/history.core.test.ts b/tests/history.core.test.ts
+new file mode 100644
+index 0000000..aed969e
+--- /dev/null
++++ b/tests/history.core.test.ts
+@@ -0,0 +1,64 @@
++import { describe, expect, it, vi } from 'vitest'
++import { create } from 'zustand'
++import { history } from 'zustand/middleware'
++import { createStore } from 'zustand/vanilla'
++
++type Counter = { count: number; label: string; inc: () => void }
++
++const initializer = (set: (partial: Partial<Counter> | ((state: Counter) => Partial<Counter>)) => void) => ({
++  count: 0,
++  label: 'initial',
++  inc: () => set((state: Counter) => ({ count: state.count + 1 })),
++})
++
++describe('history core API', () => {
++  it('history_create_exposes_temporal_on_bound_store', () => {
++    const store = create<Counter>()(history(initializer))
++    expect(store.temporal).toBeDefined()
++    expect(store.temporal.getState().pastStates).toEqual([])
++    expect(store.temporal.getState().futureStates).toEqual([])
++  })
++
++  it('history_createStore_exposes_temporal_on_vanilla_store', () => {
++    const store = createStore<Counter>()(history(initializer))
++    expect(store.temporal).toBeDefined()
++    expect(store.temporal.getState().isTracking).toBe(true)
++  })
++
++  it('history_temporal_is_a_full_store_api', () => {
++    const store = createStore<Counter>()(history(initializer))
++    expect(store.temporal.getState).toEqual(expect.any(Function))
++    expect(store.temporal.getInitialState).toEqual(expect.any(Function))
++    expect(store.temporal.setState).toEqual(expect.any(Function))
++    expect(store.temporal.subscribe).toEqual(expect.any(Function))
++  })
++
++  it('history_temporal_store_has_independent_subscriptions', () => {
++    const store = createStore<Counter>()(history(initializer))
++    const temporalListener = vi.fn()
++    const mainListener = vi.fn()
++    store.temporal.subscribe(temporalListener)
++    store.subscribe(mainListener)
++    store.temporal.setState({ isTracking: false })
++    expect(temporalListener).toHaveBeenCalledTimes(1)
++    expect(mainListener).not.toHaveBeenCalled()
++    expect(store.temporal.getState().isTracking).toBe(false)
++  })
++
++  it('history_records_updates_made_by_initializer_set', () => {
++    const store = createStore<Counter>()(history(initializer))
++    store.getState().inc()
++    store.getState().inc()
++    expect(store.getState().count).toBe(2)
++    expect(store.temporal.getState().pastStates.map((state) => state.count)).toEqual([0, 1])
++  })
++
++  it('history_records_updates_made_by_api_setState', () => {
++    const store = createStore<Counter>()(history(initializer))
++    store.setState({ count: 4 })
++    store.setState((state) => ({ count: state.count + 3 }))
++    expect(store.getState().count).toBe(7)
++    expect(store.temporal.getState().pastStates.map((state) => state.count)).toEqual([0, 4])
++    expect(store.temporal.getState().futureStates).toEqual([])
++  })
++})
+diff --git a/tests/history.integration.test.ts b/tests/history.integration.test.ts
+new file mode 100644
+index 0000000..e928fae
+--- /dev/null
++++ b/tests/history.integration.test.ts
+@@ -0,0 +1,87 @@
++import { describe, expect, it, vi } from 'vitest'
++import { devtools, history, persist, subscribeWithSelector } from 'zustand/middleware'
++import { immer } from 'zustand/middleware/immer'
++import { createStore } from 'zustand/vanilla'
++
++const memoryStorage = {
++  getItem: vi.fn(() => null),
++  setItem: vi.fn(),
++  removeItem: vi.fn(),
++}
++
++describe('history middleware composition', () => {
++  it('history_composes_outside_and_inside_immer', () => {
++    const outer = createStore(history(immer(() => ({ count: 0 }))))
++    outer.setState((state) => { state.count += 1 })
++    outer.temporal.getState().undo()
++    expect(outer.getState().count).toBe(0)
++
++    const inner = createStore(immer(history(() => ({ count: 0 }))))
++    inner.setState((state) => { state.count += 1 })
++    inner.temporal.getState().undo()
++    expect(inner.getState().count).toBe(0)
++  })
++
++  it('history_composes_outside_and_inside_persist', () => {
++    const outer = createStore(history(persist(() => ({ count: 0 }), { name: 'outer', storage: memoryStorage })))
++    outer.setState({ count: 1 })
++    outer.temporal.getState().undo()
++    expect(outer.getState().count).toBe(0)
++
++    const inner = createStore(persist(history(() => ({ count: 0 })), { name: 'inner', storage: memoryStorage }))
++    inner.setState({ count: 1 })
++    inner.temporal.getState().undo()
++    expect(inner.getState().count).toBe(0)
++  })
++
++  it('history_composes_outside_and_inside_subscribeWithSelector', () => {
++    const outer = createStore(history(subscribeWithSelector(() => ({ count: 0 }))))
++    const outerSpy = vi.fn()
++    outer.subscribe((state) => state.count, outerSpy)
++    outer.setState({ count: 1 })
++    outer.temporal.getState().undo()
++    expect(outerSpy).toHaveBeenCalledTimes(2)
++
++    const inner = createStore(subscribeWithSelector(history(() => ({ count: 0 }))))
++    const innerSpy = vi.fn()
++    inner.subscribe((state) => state.count, innerSpy)
++    inner.setState({ count: 1 })
++    inner.temporal.getState().undo()
++    expect(innerSpy).toHaveBeenCalledTimes(2)
++  })
++
++  it('history_composes_outside_and_inside_devtools', () => {
++    const outer = createStore(history(devtools(() => ({ count: 0 }), { enabled: false })))
++    outer.setState({ count: 1 })
++    outer.temporal.getState().undo()
++    expect(outer.getState().count).toBe(0)
++
++    const inner = createStore(devtools(history(() => ({ count: 0 })), { enabled: false }))
++    inner.setState({ count: 1 })
++    inner.temporal.getState().undo()
++    expect(inner.getState().count).toBe(0)
++  })
++
++  it('history_undo_and_redo_trigger_normal_subscriptions', () => {
++    const store = createStore(history(() => ({ count: 0 })))
++    store.setState({ count: 1 })
++    const listener = vi.fn()
++    store.subscribe(listener)
++    store.temporal.getState().undo()
++    store.temporal.getState().redo()
++    expect(listener).toHaveBeenCalledTimes(2)
++    expect(listener.mock.calls[0]?.[0]).toEqual({ count: 0 })
++    expect(listener.mock.calls[1]?.[0]).toEqual({ count: 1 })
++  })
++
++  it('history_temporal_subscribers_observe_stack_changes', () => {
++    const store = createStore(history(() => ({ count: 0 })))
++    const listener = vi.fn()
++    store.temporal.subscribe(listener)
++    store.setState({ count: 1 })
++    store.temporal.getState().undo()
++    store.temporal.getState().redo()
++    expect(listener).toHaveBeenCalledTimes(3)
++    expect(store.temporal.getState().pastStates).toHaveLength(1)
++  })
++})
+diff --git a/tests/history.options.test.ts b/tests/history.options.test.ts
+new file mode 100644
+index 0000000..cd85b18
+--- /dev/null
++++ b/tests/history.options.test.ts
+@@ -0,0 +1,88 @@
++import { describe, expect, it, vi } from 'vitest'
++import type { HistoryOptions } from 'zustand/middleware'
++import { history } from 'zustand/middleware'
++import { createStore } from 'zustand/vanilla'
++
++type State = { count: number; name: string }
++
++describe('history options', () => {
++  it('history_partialize_records_only_selected_keys', () => {
++    const store = createStore(history<State>(() => ({ count: 0, name: 'a' }), {
++      partialize: (state) => ({ count: state.count }),
++    }))
++    store.setState({ count: 1, name: 'b' })
++    expect(store.temporal.getState().pastStates).toEqual([{ count: 0 }])
++  })
++
++  it('history_partialize_restores_only_selected_keys', () => {
++    const store = createStore(history<State>(() => ({ count: 0, name: 'a' }), {
++      partialize: (state) => ({ count: state.count }),
++    }))
++    store.setState({ count: 1, name: 'b' })
++    store.temporal.getState().undo()
++    expect(store.getState()).toEqual({ count: 0, name: 'b' })
++  })
++
++  it('history_equality_skips_unchanged_tracked_slice', () => {
++    const equality = vi.fn((past: { count: number }, current: { count: number }) => past.count === current.count)
++    const options: HistoryOptions<State, { count: number }> = {
++      partialize: (state) => ({ count: state.count }),
++      equality,
++    }
++    const store = createStore(history<State>(() => ({ count: 0, name: 'a' }), options))
++    store.setState({ name: 'b' })
++    expect(equality).toHaveBeenCalledTimes(1)
++    expect(store.temporal.getState().pastStates).toEqual([])
++  })
++
++  it('history_equality_records_changed_tracked_slice', () => {
++    const options: HistoryOptions<State, { count: number }> = {
++      partialize: (state) => ({ count: state.count }),
++      equality: (past, current) => past.count === current.count,
++    }
++    const store = createStore(history<State>(() => ({ count: 0, name: 'a' }), options))
++    store.setState({ count: 1 })
++    expect(store.temporal.getState().pastStates).toEqual([{ count: 0 }])
++  })
++
++  it('history_onSave_runs_once_per_recorded_change', () => {
++    const onSave = vi.fn()
++    const store = createStore(history<State>(() => ({ count: 0, name: 'a' }), { onSave }))
++    store.setState({ count: 1 })
++    store.setState({ count: 2 })
++    expect(onSave).toHaveBeenCalledTimes(2)
++    expect(onSave).toHaveBeenNthCalledWith(1, expect.objectContaining({ count: 0 }), expect.objectContaining({ count: 1 }))
++    expect(onSave).toHaveBeenNthCalledWith(2, expect.objectContaining({ count: 1 }), expect.objectContaining({ count: 2 }))
++  })
++
++  it('history_onSave_does_not_run_for_equality_skipped_change', () => {
++    const onSave = vi.fn()
++    const store = createStore(history<State>(() => ({ count: 0, name: 'a' }), {
++      partialize: (state) => ({ count: state.count }),
++      equality: (past, current) => past.count === current.count,
++      onSave,
++    }))
++    store.setState({ name: 'b' })
++    expect(onSave).not.toHaveBeenCalled()
++  })
++
++  it('history_handleSet_wraps_main_store_updates', () => {
++    const wrappedSet = vi.fn()
++    const store = createStore(history<State>(() => ({ count: 0, name: 'a' }), {
++      handleSet: (setState) => (partial, replace) => {
++        wrappedSet()
++        return setState(partial as State, replace as true)
++      },
++    }))
++    store.setState({ count: 1 })
++    expect(wrappedSet).toHaveBeenCalledTimes(1)
++    expect(store.temporal.getState().pastStates).toHaveLength(1)
++  })
++
++  it('history_wrapTemporal_wraps_temporal_initializer', () => {
++    const wrapper = vi.fn((initializer) => initializer)
++    const store = createStore(history<State>(() => ({ count: 0, name: 'a' }), { wrapTemporal: wrapper }))
++    expect(wrapper).toHaveBeenCalledTimes(1)
++    expect(store.temporal.getState().isTracking).toBe(true)
++  })
++})
+diff --git a/tests/history.react.test.tsx b/tests/history.react.test.tsx
+new file mode 100644
+index 0000000..c80ebba
+--- /dev/null
++++ b/tests/history.react.test.tsx
+@@ -0,0 +1,92 @@
++import { act, render, screen } from '@testing-library/react'
++import { describe, expect, it } from 'vitest'
++import { create, useTemporal } from 'zustand'
++import { history } from 'zustand/middleware'
++import { useTemporalWithEqualityFn } from 'zustand/traditional'
++
++const makeStore = () => create(history(() => ({ count: 0 })))
++
++describe('history React bindings', () => {
++  it('history_useTemporal_reads_selected_temporal_state', () => {
++    const store = makeStore()
++    function Component() {
++      const length = useTemporal(store.temporal, (state) => state.pastStates.length)
++      return <div>past:{length}</div>
++    }
++    render(<Component />)
++    expect(screen.getByText('past:0')).toBeInTheDocument()
++    act(() => store.setState({ count: 1 }))
++    expect(screen.getByText('past:1')).toBeInTheDocument()
++  })
++
++  it('history_useTemporal_rerenders_only_for_selected_slice', () => {
++    const store = makeStore()
++    let renders = 0
++    function Component() {
++      const tracking = useTemporal(store.temporal, (state) => state.isTracking)
++      renders += 1
++      return <div>{String(tracking)}</div>
++    }
++    render(<Component />)
++    act(() => store.setState({ count: 1 }))
++    expect(renders).toBe(1)
++    act(() => store.temporal.getState().pause())
++    expect(renders).toBe(2)
++  })
++
++  it('history_useTemporal_without_selector_returns_temporal_state', () => {
++    const store = makeStore()
++    function Component() {
++      const temporal = useTemporal(store.temporal)
++      return <div>{temporal.isTracking ? 'tracking' : 'paused'}</div>
++    }
++    render(<Component />)
++    expect(screen.getByText('tracking')).toBeInTheDocument()
++  })
++
++  it('history_useTemporalWithEqualityFn_honors_custom_equality', () => {
++    const store = makeStore()
++    let renders = 0
++    function Component() {
++      const length = useTemporalWithEqualityFn(
++        store.temporal,
++        (state) => state.pastStates.length,
++        () => true,
++      )
++      renders += 1
++      return <div>length:{length}</div>
++    }
++    render(<Component />)
++    act(() => store.setState({ count: 1 }))
++    expect(renders).toBe(1)
++    expect(screen.getByText('length:0')).toBeInTheDocument()
++  })
++
++  it('history_bound_store_temporal_api_drives_components', () => {
++    const store = makeStore()
++    function Component() {
++      const canUndo = useTemporal(store.temporal, (state) => state.pastStates.length > 0)
++      return <div>{canUndo ? 'can undo' : 'cannot undo'}</div>
++    }
++    render(<Component />)
++    act(() => store.setState({ count: 1 }))
++    expect(screen.getByText('can undo')).toBeInTheDocument()
++    act(() => store.temporal.getState().undo())
++    expect(screen.getByText('cannot undo')).toBeInTheDocument()
++  })
++
++  it('history_useTemporalWithEqualityFn_updates_when_equality_returns_false', () => {
++    const store = makeStore()
++    function Component() {
++      const length = useTemporalWithEqualityFn(
++        store.temporal,
++        (state) => state.pastStates.length,
++        Object.is,
++      )
++      return <div>entries:{length}</div>
++    }
++    render(<Component />)
++    act(() => store.setState({ count: 1 }))
++    expect(screen.getByText('entries:1')).toBeInTheDocument()
++  })
++})
+diff --git a/tests/history.types.test.tsx b/tests/history.types.test.tsx
+new file mode 100644
+index 0000000..1609c07
+--- /dev/null
++++ b/tests/history.types.test.tsx
+@@ -0,0 +1,66 @@
++import { describe, expect, expectTypeOf, it } from 'vitest'
++import { create, useTemporal } from 'zustand'
++import type { StoreApi } from 'zustand'
++import { devtools, history, persist, subscribeWithSelector } from 'zustand/middleware'
++import type { HistoryOptions, TemporalState } from 'zustand/middleware'
++import { immer } from 'zustand/middleware/immer'
++import { useTemporalWithEqualityFn } from 'zustand/traditional'
++import { createStore } from 'zustand/vanilla'
++
++type Counter = { count: number; name: string }
++
++describe('history public types', () => {
++  it('history_types_infer_temporal_on_create', () => {
++    const store = create<Counter>()(history(() => ({ count: 0, name: 'bear' })))
++    expectTypeOf(store.temporal).toEqualTypeOf<StoreApi<TemporalState<Counter>>>()
++    expectTypeOf(store.temporal.getState().pastStates).toEqualTypeOf<Partial<Counter>[]>()
++    expect(store).toBeDefined()
++  })
++
++  it('history_types_infer_temporal_on_createStore', () => {
++    const store = createStore(history(() => ({ count: 0, name: 'bear' })))
++    expectTypeOf(store.temporal.getState().undo).toEqualTypeOf<(steps?: number) => void>()
++    expectTypeOf(store.temporal.getState().redo).toEqualTypeOf<(steps?: number) => void>()
++    expect(store).toBeDefined()
++  })
++
++  it('history_types_expose_HistoryOptions_and_TemporalState', () => {
++    const options: HistoryOptions<Counter, Pick<Counter, 'count'>> = {
++      limit: 3,
++      partialize: (state) => ({ count: state.count }),
++      equality: (past, current) => past.count === current.count,
++    }
++    const temporal: TemporalState<Counter> = {
++      pastStates: [], futureStates: [], undo: () => {}, redo: () => {}, clear: () => {},
++      isTracking: true, pause: () => {}, resume: () => {},
++    }
++    expect(history).toBeTypeOf('function')
++    expect(temporal.isTracking).toBe(true)
++  })
++
++  it('history_types_infer_react_binding_results', () => {
++    const store = create<Counter>()(history(() => ({ count: 0, name: 'bear' })))
++    const Component = () => {
++      expectTypeOf(useTemporal(store.temporal, (state) => state.pastStates.length)).toEqualTypeOf<number>()
++      expectTypeOf(useTemporalWithEqualityFn(store.temporal, (state) => state.isTracking, Object.is)).toEqualTypeOf<boolean>()
++      return null
++    }
++    expect(Component).toBeDefined()
++  })
++
++  it('history_types_compose_in_middleware_mutator_chains', () => {
++    const first = createStore(devtools(history(immer(() => ({ count: 0, name: 'bear' })))))
++    const second = createStore(history(subscribeWithSelector(persist(() => ({ count: 0, name: 'bear' }), { name: 'typed' }))))
++    expectTypeOf(first.temporal).toEqualTypeOf<StoreApi<TemporalState<Counter>>>()
++    expectTypeOf(second.temporal.getState().clear).toEqualTypeOf<() => void>()
++    expect(first).toBeDefined()
++    expect(second).toBeDefined()
++  })
++
++  it('history_types_preserve_main_state_setState_shape', () => {
++    const store = createStore<Counter>()(history(() => ({ count: 0, name: 'bear' })))
++    expectTypeOf<Parameters<typeof store.setState>[0]>().toMatchTypeOf<Counter | Partial<Counter> | ((state: Counter) => Counter | Partial<Counter>)>()
++    store.setState({ count: 1 })
++    expect(store.getState().count).toBe(1)
++  })
++})
+diff --git a/tests/history.undo-redo.test.ts b/tests/history.undo-redo.test.ts
+new file mode 100644
+index 0000000..72631f6
+--- /dev/null
++++ b/tests/history.undo-redo.test.ts
+@@ -0,0 +1,92 @@
++import { describe, expect, it, vi } from 'vitest'
++import { history } from 'zustand/middleware'
++import { createStore } from 'zustand/vanilla'
++
++const makeStore = () => createStore(history(() => ({ count: 0, name: 'bear' })))
++
++describe('history undo and redo', () => {
++  it('history_undo_restores_immediately_preceding_state', () => {
++    const store = makeStore()
++    store.setState({ count: 1 })
++    store.setState({ count: 2 })
++    store.temporal.getState().undo()
++    expect(store.getState().count).toBe(1)
++    expect(store.temporal.getState().pastStates.map((state) => state.count)).toEqual([0])
++  })
++
++  it('history_undo_moves_current_state_to_future', () => {
++    const store = makeStore()
++    store.setState({ count: 1 })
++    store.temporal.getState().undo()
++    expect(store.temporal.getState().futureStates.map((state) => state.count)).toEqual([1])
++  })
++
++  it('history_undo_multiple_steps_is_atomic', () => {
++    const store = makeStore()
++    store.setState({ count: 1 })
++    store.setState({ count: 2 })
++    store.setState({ count: 3 })
++    const listener = vi.fn()
++    store.subscribe(listener)
++    store.temporal.getState().undo(2)
++    expect(store.getState().count).toBe(1)
++    expect(listener).toHaveBeenCalledTimes(1)
++    expect(store.temporal.getState().futureStates.map((state) => state.count)).toEqual([3, 2])
++  })
++
++  it('history_redo_reapplies_most_recently_undone_state', () => {
++    const store = makeStore()
++    store.setState({ count: 1 })
++    store.setState({ count: 2 })
++    store.temporal.getState().undo(2)
++    store.temporal.getState().redo()
++    expect(store.getState().count).toBe(1)
++    expect(store.temporal.getState().futureStates.map((state) => state.count)).toEqual([2])
++  })
++
++  it('history_redo_multiple_steps_is_atomic', () => {
++    const store = makeStore()
++    store.setState({ count: 1 })
++    store.setState({ count: 2 })
++    store.setState({ count: 3 })
++    store.temporal.getState().undo(3)
++    const listener = vi.fn()
++    store.subscribe(listener)
++    store.temporal.getState().redo(2)
++    expect(store.getState().count).toBe(2)
++    expect(listener).toHaveBeenCalledTimes(1)
++    expect(store.temporal.getState().pastStates.map((state) => state.count)).toEqual([0, 1])
++  })
++
++  it('history_new_change_after_undo_clears_future', () => {
++    const store = makeStore()
++    store.setState({ count: 1 })
++    store.setState({ count: 2 })
++    store.temporal.getState().undo()
++    store.setState({ count: 9 })
++    expect(store.temporal.getState().futureStates).toEqual([])
++    expect(store.temporal.getState().pastStates.map((state) => state.count)).toEqual([0, 1])
++  })
++
++  it('history_undo_and_redo_exhaust_available_entries', () => {
++    const store = makeStore()
++    store.setState({ count: 1 })
++    store.setState({ count: 2 })
++    store.temporal.getState().undo(20)
++    expect(store.getState().count).toBe(0)
++    store.temporal.getState().redo(20)
++    expect(store.getState().count).toBe(2)
++    expect(store.temporal.getState().futureStates).toEqual([])
++  })
++
++  it('history_zero_step_travel_is_a_noop', () => {
++    const store = makeStore()
++    store.setState({ count: 1 })
++    const temporalBefore = store.temporal.getState()
++    store.temporal.getState().undo(0)
++    store.temporal.getState().redo(0)
++    expect(store.getState().count).toBe(1)
++    expect(store.temporal.getState().pastStates).toEqual(temporalBefore.pastStates)
++    expect(store.temporal.getState().futureStates).toEqual([])
++  })
++})

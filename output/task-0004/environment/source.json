@@ -1,0 +1,7 @@
+{
+  "mode": "remote-pinned-checkout",
+  "repository": "react/react",
+  "base_commit_hash": "ec61f187fe39b0aa8ec6b508f2553b2047dc30cc",
+  "cache_path": "workspaces/repositories/react__react",
+  "remote_fetch_in_dockerfile": true
+}

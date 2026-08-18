@@ -1,0 +1,972 @@
+diff --git a/src/cli.rs b/src/cli.rs
+index 4cd54a8..c038c86 100644
+--- a/src/cli.rs
++++ b/src/cli.rs
+@@ -4,8 +4,8 @@ use std::time::Duration;
+ 
+ use anyhow::anyhow;
+ use clap::{
+-    Arg, ArgAction, ArgGroup, ArgMatches, Command, Parser, ValueEnum, error::ErrorKind,
+-    value_parser,
++    Arg, ArgAction, ArgGroup, ArgMatches, Command, CommandFactory, Parser, ValueEnum,
++    error::ErrorKind, value_parser,
+ };
+ #[cfg(feature = "completions")]
+ use clap_complete::Shell;
+@@ -17,6 +17,7 @@ use crate::filesystem;
+ #[cfg(unix)]
+ use crate::filter::OwnerFilter;
+ use crate::filter::SizeFilter;
++use crate::sort::SortBy;
+ 
+ #[derive(Parser)]
+ #[command(
+@@ -486,6 +487,56 @@ pub struct Opts {
+     )]
+     pub format: Option<String>,
+ 
++    /// Sort the search results by the given key. By default ('none'), results
++    /// are streamed to the output in the order in which they are discovered.
++    /// That order is nondeterministic because the directory traversal is
++    /// parallelized across threads, so two runs (or runs with different thread
++    /// counts) can print the same set of matches in a different order.
++    ///
++    /// Choosing any key other than 'none' buffers every matching entry from all
++    /// search roots, arranges the full set into a total, deterministic order,
++    /// and only then produces output (or runs '--exec'/'--exec-batch'
++    /// commands). The sort is applied *before* '--max-results' truncation, so
++    /// '--sort size --max-results 3' returns the three smallest files rather
++    /// than the first three discovered. All comparisons operate on raw OS bytes
++    /// and are therefore case-sensitive; every key falls back to comparing the
++    /// full path so the order is always a strict total order.
++    ///
++    /// Available keys:
++    /// {n}  'none':      do not sort; stream results as discovered (default)
++    /// {n}  'path':      full path, compared by raw OS bytes
++    /// {n}  'name':      file name (basename), ties broken by full path
++    /// {n}  'size':      file size in bytes (numeric), ties broken by full path
++    /// {n}  'modified':  modification time (oldest first), ties by full path
++    /// {n}  'accessed':  access time (oldest first), ties by full path
++    /// {n}  'created':   creation time (oldest first), ties by full path
++    /// {n}  'extension': file extension (entries without one first), then name
++    ///
++    /// Entries whose metadata cannot be read are treated as size 0, and
++    /// timestamps that are unavailable on the current platform sort as the UNIX
++    /// epoch, so missing metadata never causes a panic.
++    #[arg(
++        long,
++        value_enum,
++        value_name = "key",
++        default_value_t = SortBy::None,
++        help = "Sort the results by the given key (implies buffered output)",
++        long_help
++    )]
++    pub sort: SortBy,
++
++    /// Reverse the order of the sorted search results. This flag requires
++    /// '--sort' to be given with a key other than 'none'; using '--reverse' on
++    /// its own (or together with '--sort none') is a usage error. Reversal is
++    /// applied after sorting, so '--sort <key> --reverse' produces exactly the
++    /// reverse of '--sort <key>'.
++    #[arg(
++        long,
++        help = "Reverse the order of the sorted search results",
++        long_help
++    )]
++    pub reverse: bool,
++
+     #[command(flatten)]
+     pub exec: Exec,
+ 
+@@ -694,6 +745,9 @@ pub struct Opts {
+ 
+ impl Opts {
+     pub fn search_paths(&self) -> anyhow::Result<Vec<PathBuf>> {
++        // `--reverse` only makes sense alongside a real sort key. Validate the
++        // relationship as early as possible, before any filesystem work.
++        self.validate_sort_options();
+         // would it make sense to concatenate these?
+         let paths = if !self.path.is_empty() {
+             &self.path
+@@ -720,6 +774,28 @@ impl Opts {
+             .collect())
+     }
+ 
++    /// Validate the relationship between `--sort` and `--reverse`.
++    ///
++    /// `--reverse` is only meaningful when the results are being sorted, so it
++    /// requires `--sort` to be given with a key other than `none`. Because
++    /// `--sort` carries a default value (`none`), clap's declarative `requires`
++    /// cannot express "requires a *non-default* value" (a defaulted argument is
++    /// always considered present). We therefore enforce the constraint here and
++    /// emit a genuine clap usage error (exit code 2, with the standard usage
++    /// footer) when it is violated. This covers both `--reverse` on its own and
++    /// the explicit `--sort none --reverse` combination.
++    fn validate_sort_options(&self) {
++        if self.reverse && self.sort == SortBy::None {
++            let mut cmd = Opts::command();
++            cmd.error(
++                ErrorKind::MissingRequiredArgument,
++                "the argument '--reverse' requires '--sort <key>' with a key \
++                 other than 'none'",
++            )
++            .exit();
++        }
++    }
++
+     fn normalize_path(&self, path: &Path) -> PathBuf {
+         if self.absolute_path {
+             filesystem::absolute_path(path.normalize().unwrap().as_path()).unwrap()
+diff --git a/src/config.rs b/src/config.rs
+index a027812..23e9c03 100644
+--- a/src/config.rs
++++ b/src/config.rs
+@@ -133,6 +133,29 @@ pub struct Config {
+ 
+     /// Names that should stop traversal down their parent. (e.g. https://bford.info/cachedir/).
+     pub ignore_contain: Vec<String>,
++
++    /// The key used to sort search results.
++    ///
++    /// [`crate::sort::SortBy::None`] preserves the historical streaming
++    /// behavior: results are printed as they are discovered, with no buffering
++    /// and byte-for-byte identical output to the base commit. Any other key
++    /// switches `fd` into buffered mode: every matching entry across all search
++    /// roots is collected, sorted into a total, deterministic order (see
++    /// [`crate::sort::compare`]), and only then produced as output (or fed to
++    /// `--exec`/`--exec-batch`). When a sort key is active the `max_buffer_time`
++    /// deadline is irrelevant, because output is deferred until every result is
++    /// available.
++    pub sort: crate::sort::SortBy,
++
++    /// Whether to reverse the final sorted order.
++    ///
++    /// This is only meaningful when [`Config::sort`] is not
++    /// [`crate::sort::SortBy::None`]; the CLI guarantees `--reverse` is rejected
++    /// unless a non-`none` `--sort` key is supplied. Reversal is applied *after*
++    /// sorting (and before `--max-results` truncation is irrelevant here since
++    /// truncation happens on the already-ordered vector), so `--sort <key>
++    /// --reverse` yields exactly the reverse of `--sort <key>`.
++    pub sort_reverse: bool,
+ }
+ 
+ impl Config {
+diff --git a/src/dir_entry.rs b/src/dir_entry.rs
+index c79c3e8..387aee7 100644
+--- a/src/dir_entry.rs
++++ b/src/dir_entry.rs
+@@ -1,5 +1,5 @@
+ use std::cell::OnceCell;
+-use std::ffi::OsString;
++use std::ffi::{OsStr, OsString};
+ use std::fs::{FileType, Metadata};
+ use std::path::{Path, PathBuf};
+ 
+@@ -53,6 +53,22 @@ impl DirEntry {
+         }
+     }
+ 
++    /// The file extension of this entry, if any.
++    ///
++    /// Returns the extension of the entry's path (the trailing component after
++    /// the final `.`, without the leading dot), or `None` when the file name
++    /// has no extension (including dotfiles such as `.gitignore`, which
++    /// `Path::extension` reports as having no extension). This is used by the
++    /// sort facility to order results by extension; entries lacking an
++    /// extension are ordered before any entry that has one.
++    ///
++    /// The returned value borrows directly from the entry's path, so no
++    /// allocation is performed and the raw OS bytes are preserved for a
++    /// case-sensitive comparison.
++    pub fn extension(&self) -> Option<&OsStr> {
++        self.path().extension()
++    }
++
+     /// Returns the path as it should be presented to the user.
+     /// When stripping `./` would leave the path starting with `-`, keep the original
+     /// (with `./`) so downstream tools don't interpret it as an option.
+@@ -186,4 +202,45 @@ mod tests {
+         assert!(!starts_with_dash(Path::new("")));
+         assert!(!starts_with_dash(Path::new(" -rf")));
+     }
++
++    #[test]
++    fn extension_reports_trailing_extension() {
++        use super::DirEntry;
++        use std::ffi::OsStr;
++        use std::path::PathBuf;
++
++        let entry = DirEntry::broken_symlink(PathBuf::from("dir/file.rs"));
++        assert_eq!(entry.extension(), Some(OsStr::new("rs")));
++    }
++
++    #[test]
++    fn extension_is_none_without_a_dot() {
++        use super::DirEntry;
++        use std::path::PathBuf;
++
++        let entry = DirEntry::broken_symlink(PathBuf::from("dir/README"));
++        assert_eq!(entry.extension(), None);
++    }
++
++    #[test]
++    fn extension_of_dotfile_is_none() {
++        use super::DirEntry;
++        use std::path::PathBuf;
++
++        // A leading-dot file name has no extension per `Path::extension`.
++        let entry = DirEntry::broken_symlink(PathBuf::from("dir/.gitignore"));
++        assert_eq!(entry.extension(), None);
++    }
++
++    #[test]
++    fn extension_uses_final_component_only() {
++        use super::DirEntry;
++        use std::ffi::OsStr;
++        use std::path::PathBuf;
++
++        // Dots in parent directories must not be mistaken for the entry's
++        // extension.
++        let entry = DirEntry::broken_symlink(PathBuf::from("a.b/c.d/file.tar.gz"));
++        assert_eq!(entry.extension(), Some(OsStr::new("gz")));
++    }
+ }
+diff --git a/src/exec/job.rs b/src/exec/job.rs
+index 55f1e88..906bf6c 100644
+--- a/src/exec/job.rs
++++ b/src/exec/job.rs
+@@ -8,6 +8,10 @@ use super::CommandSet;
+ /// An event loop that listens for inputs from the `rx` receiver. Each received input will
+ /// generate a command with the supplied command template. The generated command will then
+ /// be executed, and this process will continue until the receiver's sender has closed.
++///
++/// Results are consumed strictly in iteration order, so when the caller supplies an
++/// already-sorted sequence of entries (see `config.sort`), the commands are executed in
++/// that sorted order.
+ pub fn job(
+     results: impl IntoIterator<Item = WorkerResult>,
+     cmd: &CommandSet,
+@@ -43,6 +47,9 @@ pub fn job(
+     ret
+ }
+ 
++/// Collect all results into a single batch command invocation. Entries are appended as
++/// arguments in iteration order, so when the caller supplies an already-sorted sequence of
++/// entries (see `config.sort`), the batch argument order follows that sorted order.
+ pub fn batch(
+     results: impl IntoIterator<Item = WorkerResult>,
+     cmd: &CommandSet,
+diff --git a/src/main.rs b/src/main.rs
+index 609078b..57efc55 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -12,6 +12,7 @@ mod hyperlink;
+ mod output;
+ mod regex_helper;
+ mod sanitize;
++mod sort;
+ mod walk;
+ 
+ use std::env;
+@@ -389,6 +390,14 @@ fn construct_config(mut opts: Opts, pattern_regexps: &[String]) -> Result<Config
+         max_results: opts.max_results(),
+         strip_cwd_prefix: opts.strip_cwd_prefix(|| !(opts.null_separator || has_command)),
+         ignore_contain: opts.ignore_contain,
++        // Thread the parsed sort key and reverse flag into the runtime config.
++        // `SortBy::None` (the default) keeps the historical streaming behavior
++        // byte-for-byte; any other key switches `walk` into buffered, sorted
++        // mode. The CLI has already validated that `sort_reverse` is only set
++        // together with a non-`none` sort key, so no further checking is needed
++        // here.
++        sort: opts.sort,
++        sort_reverse: opts.reverse,
+     })
+ }
+ 
+diff --git a/src/output.rs b/src/output.rs
+index 262647a..70f4dae 100644
+--- a/src/output.rs
++++ b/src/output.rs
+@@ -42,6 +42,23 @@ pub fn print_entry<W: Write>(stdout: &mut W, entry: &DirEntry, config: &Config)
+     }
+ }
+ 
++/// Print a sequence of already-ordered entries using a single writer.
++///
++/// Used by the sorted (buffered) output path, where every matching entry has
++/// been collected and sorted before any output is produced. Each entry is
++/// formatted exactly as in the streaming path (long-format/color/null-separator
++/// handling all live in [`print_entry`]), so only the ordering differs.
++pub fn print_entries<W: Write>(
++    stdout: &mut W,
++    entries: &[DirEntry],
++    config: &Config,
++) -> io::Result<()> {
++    for entry in entries {
++        print_entry(stdout, entry, config)?;
++    }
++    Ok(())
++}
++
+ // Display a trailing slash if the path is a directory and the config option is enabled.
+ // If the path_separator option is set, display that instead.
+ // The trailing slash will not be colored.
+diff --git a/src/sort.rs b/src/sort.rs
+new file mode 100644
+index 0000000..e30d774
+--- /dev/null
++++ b/src/sort.rs
+@@ -0,0 +1,560 @@
++//! Deterministic sorting of search results.
++//!
++//! By default `fd` streams matching entries to the output in the order in
++//! which the parallel directory walk discovers them. That order is not
++//! deterministic: it depends on the number of worker threads, on scheduling,
++//! and on the underlying filesystem. This module provides a first-class
++//! sorting facility that, when enabled, buffers every matching entry and
++//! arranges the full set into a *total, deterministic* order so that identical
++//! inputs always produce identical output regardless of thread count.
++//!
++//! The public surface is intentionally small:
++//!
++//! * [`SortBy`] enumerates the accepted sort keys (and doubles as the
++//!   `clap::ValueEnum` used by the CLI).
++//! * [`compare`] defines the total order between two [`DirEntry`] values for a
++//!   given key.
++//! * [`sort_results`] sorts a vector of entries in place, optionally reversing
++//!   the final order.
++//!
++//! Every ordering rule ultimately falls back to comparing the raw bytes of the
++//! full path, which guarantees a strict total order even when two entries share
++//! the same name, size, timestamp, or extension. Comparisons operate on raw OS
++//! bytes and are therefore case-sensitive; smart-case matching is unrelated to
++//! sorting.
++
++use std::cmp::Ordering;
++use std::ffi::OsStr;
++use std::fs::Metadata;
++use std::time::{SystemTime, UNIX_EPOCH};
++
++use clap::ValueEnum;
++
++use crate::dir_entry::DirEntry;
++
++/// The key used to sort search results.
++///
++/// [`SortBy::None`] preserves the historical streaming behavior (results
++/// printed as they are discovered, with no buffering). Any other variant
++/// switches `fd` into buffered mode: every matching entry is collected across
++/// all search roots, sorted according to a total, deterministic order, and only
++/// then produced as output (or fed to `--exec`/`--exec-batch`).
++///
++/// The enum derives [`clap::ValueEnum`] so it can be used directly as the value
++/// parser for the `--sort` option; the variant names map to the lower-case CLI
++/// keys `none`, `path`, `name`, `size`, `modified`, `accessed`, `created`, and
++/// `extension`.
++#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, ValueEnum)]
++pub enum SortBy {
++    /// Do not sort; preserve traversal (streaming) order. This is the default
++    /// and keeps the streaming, unbuffered code path untouched.
++    #[default]
++    None,
++    /// Sort by the full path, compared by raw OS bytes.
++    Path,
++    /// Sort by file name (basename), tie-broken by full path.
++    Name,
++    /// Sort by file size in bytes (numeric), tie-broken by full path.
++    Size,
++    /// Sort by modification time (oldest first), tie-broken by full path.
++    Modified,
++    /// Sort by access time (oldest first), tie-broken by full path.
++    Accessed,
++    /// Sort by creation time (oldest first), tie-broken by full path.
++    Created,
++    /// Sort by file extension, entries without an extension first, then by
++    /// file name, then by full path.
++    Extension,
++}
++
++impl SortBy {
++    /// Whether this key requires buffering all results before producing output.
++    ///
++    /// Every key except [`SortBy::None`] buffers. This helper keeps the
++    /// buffering decision in one place so callers do not need to spell out the
++    /// comparison against `None` themselves.
++    #[inline]
++    pub fn is_buffered(self) -> bool {
++        self != SortBy::None
++    }
++
++    /// Whether this key derives its ordering from filesystem metadata.
++    ///
++    /// `size`, `modified`, `accessed`, and `created` all read [`Metadata`];
++    /// the remaining keys only look at the path. This is primarily useful for
++    /// reasoning about the fallback behavior when metadata is unavailable.
++    #[inline]
++    pub fn needs_metadata(self) -> bool {
++        matches!(
++            self,
++            SortBy::Size | SortBy::Modified | SortBy::Accessed | SortBy::Created
++        )
++    }
++}
++
++/// The raw encoded bytes backing an [`OsStr`].
++///
++/// `OsStr::as_encoded_bytes` returns a platform-defined but stable encoding
++/// that round-trips and preserves byte-wise ordering, which is exactly what we
++/// need for a deterministic, case-sensitive comparison.
++#[inline]
++fn os_bytes(s: &OsStr) -> &[u8] {
++    s.as_encoded_bytes()
++}
++
++/// The raw path bytes of an entry.
++#[inline]
++fn path_bytes(entry: &DirEntry) -> &[u8] {
++    os_bytes(entry.path().as_os_str())
++}
++
++/// Compare two entries by the raw bytes of their full path.
++///
++/// This is the universal tie-breaker that upgrades every per-key ordering into
++/// a strict total order: two distinct entries always have distinct paths, so
++/// comparing paths can only return [`Ordering::Equal`] for genuinely identical
++/// entries.
++#[inline]
++fn cmp_path(a: &DirEntry, b: &DirEntry) -> Ordering {
++    path_bytes(a).cmp(path_bytes(b))
++}
++
++/// The raw bytes of an entry's file name (basename), or an empty slice if it
++/// has none (e.g. a root path).
++#[inline]
++fn file_name_bytes(entry: &DirEntry) -> &[u8] {
++    entry.path().file_name().map(os_bytes).unwrap_or(&[])
++}
++
++/// Compare two entries by file name (basename), then fall back to the full
++/// path to guarantee a total order.
++#[inline]
++fn cmp_name(a: &DirEntry, b: &DirEntry) -> Ordering {
++    file_name_bytes(a)
++        .cmp(file_name_bytes(b))
++        .then_with(|| cmp_path(a, b))
++}
++
++/// The byte length reported by an entry's metadata, or `0` when metadata is
++/// unavailable (broken symlinks, permission errors, races, ...).
++///
++/// Treating missing metadata as size `0` is what the documented ordering rule
++/// requires and, combined with the path tie-breaker, keeps the comparison a
++/// total order and panic-free.
++#[inline]
++fn size_of(entry: &DirEntry) -> u64 {
++    entry.metadata().map(Metadata::len).unwrap_or(0)
++}
++
++/// Compare two entries by numeric byte length, then by full path.
++///
++/// The comparison is numeric (`u64`), so a 9-byte file precedes a 100-byte
++/// file; a naive lexicographic comparison of the decimal strings would order
++/// them the other way around.
++#[inline]
++fn cmp_size(a: &DirEntry, b: &DirEntry) -> Ordering {
++    size_of(a).cmp(&size_of(b)).then_with(|| cmp_path(a, b))
++}
++
++/// Extract a [`SystemTime`] from an entry's metadata using `extract`, falling
++/// back to the UNIX epoch when metadata is missing or the timestamp is not
++/// available on the current platform.
++///
++/// The fallback is what makes the timestamp keys robust: platforms that do not
++/// track, say, creation time simply sort those entries as the epoch rather than
++/// panicking or producing a partial order.
++#[inline]
++fn time_of<F>(entry: &DirEntry, extract: F) -> SystemTime
++where
++    F: Fn(&Metadata) -> std::io::Result<SystemTime>,
++{
++    entry
++        .metadata()
++        .and_then(|m| extract(m).ok())
++        .unwrap_or(UNIX_EPOCH)
++}
++
++/// Compare two entries by a `SystemTime` extracted from their metadata
++/// (ascending, oldest first), then by full path.
++#[inline]
++fn cmp_time<F>(a: &DirEntry, b: &DirEntry, extract: F) -> Ordering
++where
++    F: Fn(&Metadata) -> std::io::Result<SystemTime>,
++{
++    time_of(a, &extract)
++        .cmp(&time_of(b, &extract))
++        .then_with(|| cmp_path(a, b))
++}
++
++/// Compare two optional extensions with "no extension" ordering before any
++/// extension, and present extensions compared by raw bytes.
++#[inline]
++fn cmp_extension_opt(a: Option<&OsStr>, b: Option<&OsStr>) -> Ordering {
++    match (a, b) {
++        (None, None) => Ordering::Equal,
++        (None, Some(_)) => Ordering::Less,
++        (Some(_), None) => Ordering::Greater,
++        (Some(x), Some(y)) => os_bytes(x).cmp(os_bytes(y)),
++    }
++}
++
++/// Compare two entries by file extension (entries without an extension first),
++/// then by file name, then by full path.
++#[inline]
++fn cmp_extension(a: &DirEntry, b: &DirEntry) -> Ordering {
++    cmp_extension_opt(a.extension(), b.extension())
++        .then_with(|| file_name_bytes(a).cmp(file_name_bytes(b)))
++        .then_with(|| cmp_path(a, b))
++}
++
++/// Total, deterministic ordering of two entries for the given sort key.
++///
++/// Every branch ultimately falls back to comparing the full path bytes, so the
++/// result is a strict total order: for any three entries the ordering is
++/// reflexive, antisymmetric, and transitive, and identical inputs always
++/// produce identical output regardless of the thread count used during
++/// traversal.
++///
++/// `SortBy::None` is treated as "compare by path" here so that callers who ask
++/// for a comparison unconditionally still get a well-defined total order; the
++/// streaming decision (whether to sort at all) lives in [`sort_results`].
++pub fn compare(a: &DirEntry, b: &DirEntry, sort_by: SortBy) -> Ordering {
++    match sort_by {
++        SortBy::None | SortBy::Path => cmp_path(a, b),
++        SortBy::Name => cmp_name(a, b),
++        SortBy::Size => cmp_size(a, b),
++        SortBy::Modified => cmp_time(a, b, Metadata::modified),
++        SortBy::Accessed => cmp_time(a, b, Metadata::accessed),
++        SortBy::Created => cmp_time(a, b, Metadata::created),
++        SortBy::Extension => cmp_extension(a, b),
++    }
++}
++
++/// Sort a vector of entries in place according to `sort_by`, optionally
++/// reversing the final order.
++///
++/// A [`SortBy::None`] key is a no-op so the streaming code path stays untouched
++/// (and `reverse` is ignored in that case, mirroring the CLI constraint that
++/// `--reverse` requires a non-`none` `--sort`). For any other key the entries
++/// are sorted with the total order defined by [`compare`]; because the order is
++/// total, a stable or unstable sort would yield the same result, but we use a
++/// stable sort so the behavior is easy to reason about.
++///
++/// Reversing is applied *after* sorting so that `--sort <key> --reverse`
++/// produces exactly the reverse of `--sort <key>`.
++pub fn sort_results(entries: &mut Vec<DirEntry>, sort_by: SortBy, reverse: bool) {
++    if sort_by == SortBy::None {
++        return;
++    }
++
++    entries.sort_by(|a, b| compare(a, b, sort_by));
++
++    if reverse {
++        entries.reverse();
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::dir_entry::DirEntry;
++    use std::path::PathBuf;
++
++    /// Construct a `DirEntry` from an arbitrary (possibly nonexistent) path
++    /// without touching the disk. Using the broken-symlink constructor lets us
++    /// exercise the path-based ordering rules deterministically; metadata-based
++    /// keys fall back to their documented defaults because the paths do not
++    /// exist.
++    fn entry(path: &str) -> DirEntry {
++        DirEntry::broken_symlink(PathBuf::from(path))
++    }
++
++    /// Sort the given paths by `sort_by`/`reverse` and return the resulting
++    /// path strings, for convenient assertions.
++    fn sorted(paths: &[&str], sort_by: SortBy, reverse: bool) -> Vec<String> {
++        let mut entries: Vec<DirEntry> = paths.iter().map(|p| entry(p)).collect();
++        sort_results(&mut entries, sort_by, reverse);
++        entries
++            .iter()
++            .map(|e| e.path().to_string_lossy().into_owned())
++            .collect()
++    }
++
++    #[test]
++    fn none_preserves_order() {
++        assert_eq!(
++            sorted(&["b", "a", "c"], SortBy::None, false),
++            vec!["b", "a", "c"]
++        );
++    }
++
++    #[test]
++    fn none_ignores_reverse() {
++        // `--reverse` requires a non-none key, so `None` must ignore it and
++        // leave the input order completely untouched.
++        assert_eq!(
++            sorted(&["b", "a", "c"], SortBy::None, true),
++            vec!["b", "a", "c"]
++        );
++    }
++
++    #[test]
++    fn sort_by_path_is_byte_order() {
++        assert_eq!(
++            sorted(&["b/x", "a/z", "a/a"], SortBy::Path, false),
++            vec!["a/a", "a/z", "b/x"]
++        );
++    }
++
++    #[test]
++    fn sort_by_path_reversed() {
++        assert_eq!(
++            sorted(&["b/x", "a/z", "a/a"], SortBy::Path, true),
++            vec!["b/x", "a/z", "a/a"]
++        );
++    }
++
++    #[test]
++    fn sort_by_name_breaks_ties_by_path() {
++        // All three basenames differ except the two "a" files; the "a" files
++        // must be ordered by their full path.
++        assert_eq!(
++            sorted(&["z/a", "a/a", "a/b"], SortBy::Name, false),
++            vec!["a/a", "z/a", "a/b"]
++        );
++    }
++
++    #[test]
++    fn sort_by_name_is_case_sensitive() {
++        // Byte-wise ordering places uppercase ASCII before lowercase ASCII.
++        assert_eq!(
++            sorted(&["dir/b", "dir/A", "dir/a"], SortBy::Name, false),
++            vec!["dir/A", "dir/a", "dir/b"]
++        );
++    }
++
++    #[test]
++    fn sort_by_extension_orders_none_first() {
++        assert_eq!(
++            sorted(&["a.rs", "b", "c.md"], SortBy::Extension, false),
++            vec!["b", "c.md", "a.rs"]
++        );
++    }
++
++    #[test]
++    fn sort_by_extension_ties_break_by_name_then_path() {
++        // Same extension ".rs": order by basename (a before b), and equal
++        // basenames fall through to the full path.
++        assert_eq!(
++            sorted(&["z/b.rs", "z/a.rs", "y/a.rs"], SortBy::Extension, false),
++            vec!["y/a.rs", "z/a.rs", "z/b.rs"]
++        );
++    }
++
++    #[test]
++    fn sort_by_size_missing_metadata_is_zero() {
++        // None of these exist, so all sizes are 0 and ordering falls back to
++        // the path tie-breaker.
++        assert_eq!(
++            sorted(&["c", "a", "b"], SortBy::Size, false),
++            vec!["a", "b", "c"]
++        );
++    }
++
++    #[test]
++    fn sort_by_size_is_numeric_not_lexicographic() {
++        use std::io::Write;
++        let dir = std::env::temp_dir().join("fd_sort_size_test_numeric");
++        let _ = std::fs::remove_dir_all(&dir);
++        std::fs::create_dir_all(&dir).unwrap();
++
++        let small = dir.join("small.txt");
++        let large = dir.join("large.txt");
++        std::fs::File::create(&small)
++            .unwrap()
++            .write_all(&[b'x'; 9])
++            .unwrap();
++        std::fs::File::create(&large)
++            .unwrap()
++            .write_all(&[b'x'; 100])
++            .unwrap();
++
++        let mut entries = vec![
++            DirEntry::broken_symlink(large.clone()),
++            DirEntry::broken_symlink(small.clone()),
++        ];
++        // Broken-symlink entries read metadata via symlink_metadata, which for
++        // a real regular file returns its true length. The 9-byte file must
++        // precede the 100-byte file numerically.
++        sort_results(&mut entries, SortBy::Size, false);
++        assert_eq!(entries[0].path(), small.as_path());
++        assert_eq!(entries[1].path(), large.as_path());
++
++        let _ = std::fs::remove_dir_all(&dir);
++    }
++
++    #[test]
++    fn timestamp_keys_missing_metadata_do_not_panic() {
++        // None of these paths exist, so timestamps are unavailable and must
++        // fall back to the UNIX epoch without panicking; equal epochs then fall
++        // back to the path tie-breaker.
++        for key in [
++            SortBy::Modified,
++            SortBy::Accessed,
++            SortBy::Created,
++            SortBy::Size,
++        ] {
++            let result = sorted(&["b", "a", "c"], key, false);
++            assert_eq!(result, vec!["a", "b", "c"], "key {key:?} misbehaved");
++        }
++    }
++
++    #[test]
++    fn reverse_reverses_final_order() {
++        let forward = sorted(&["a/a", "a/z", "b/x"], SortBy::Path, false);
++        let mut expected = forward.clone();
++        expected.reverse();
++        assert_eq!(sorted(&["a/a", "a/z", "b/x"], SortBy::Path, true), expected);
++    }
++
++    #[test]
++    fn compare_is_reflexive() {
++        let a = entry("some/path");
++        for key in [
++            SortBy::None,
++            SortBy::Path,
++            SortBy::Name,
++            SortBy::Size,
++            SortBy::Modified,
++            SortBy::Accessed,
++            SortBy::Created,
++            SortBy::Extension,
++        ] {
++            assert_eq!(compare(&a, &a, key), Ordering::Equal, "key {key:?}");
++        }
++    }
++
++    #[test]
++    fn compare_is_antisymmetric() {
++        let a = entry("a/a");
++        let b = entry("a/b");
++        for key in [
++            SortBy::Path,
++            SortBy::Name,
++            SortBy::Size,
++            SortBy::Modified,
++            SortBy::Accessed,
++            SortBy::Created,
++            SortBy::Extension,
++        ] {
++            let ab = compare(&a, &b, key);
++            let ba = compare(&b, &a, key);
++            assert_eq!(ab, ba.reverse(), "key {key:?} not antisymmetric");
++            assert_ne!(ab, Ordering::Equal, "distinct paths must not be equal");
++        }
++    }
++
++    #[test]
++    fn compare_is_transitive() {
++        // For a total order, a <= b and b <= c must imply a <= c.
++        let paths = ["a/a", "a/b", "b/a", "b/b", "c", "d.rs", "e.md", "f"];
++        for key in [
++            SortBy::Path,
++            SortBy::Name,
++            SortBy::Size,
++            SortBy::Extension,
++        ] {
++            let entries: Vec<DirEntry> = paths.iter().map(|p| entry(p)).collect();
++            for i in 0..entries.len() {
++                for j in 0..entries.len() {
++                    for k in 0..entries.len() {
++                        let ij = compare(&entries[i], &entries[j], key);
++                        let jk = compare(&entries[j], &entries[k], key);
++                        let ik = compare(&entries[i], &entries[k], key);
++                        if ij != Ordering::Greater && jk != Ordering::Greater {
++                            assert_ne!(
++                                ik,
++                                Ordering::Greater,
++                                "transitivity violated for key {key:?}"
++                            );
++                        }
++                    }
++                }
++            }
++        }
++    }
++
++    #[test]
++    fn sort_is_deterministic_across_input_permutations() {
++        // The total order guarantees the same output regardless of the initial
++        // (traversal) order, which is exactly the cross-thread-count guarantee.
++        let base = sorted(&["a/a", "a/z", "b/x", "c/c"], SortBy::Path, false);
++        let permutations: &[&[&str]] = &[
++            &["a/a", "a/z", "b/x", "c/c"],
++            &["c/c", "b/x", "a/z", "a/a"],
++            &["b/x", "c/c", "a/a", "a/z"],
++            &["a/z", "a/a", "c/c", "b/x"],
++        ];
++        for perm in permutations {
++            assert_eq!(sorted(perm, SortBy::Path, false), base);
++        }
++    }
++
++    #[test]
++    fn is_buffered_matches_none() {
++        assert!(!SortBy::None.is_buffered());
++        for key in [
++            SortBy::Path,
++            SortBy::Name,
++            SortBy::Size,
++            SortBy::Modified,
++            SortBy::Accessed,
++            SortBy::Created,
++            SortBy::Extension,
++        ] {
++            assert!(key.is_buffered(), "key {key:?} should buffer");
++        }
++    }
++
++    #[test]
++    fn needs_metadata_only_for_size_and_times() {
++        assert!(SortBy::Size.needs_metadata());
++        assert!(SortBy::Modified.needs_metadata());
++        assert!(SortBy::Accessed.needs_metadata());
++        assert!(SortBy::Created.needs_metadata());
++        assert!(!SortBy::None.needs_metadata());
++        assert!(!SortBy::Path.needs_metadata());
++        assert!(!SortBy::Name.needs_metadata());
++        assert!(!SortBy::Extension.needs_metadata());
++    }
++
++    #[test]
++    fn extension_helper_orders_none_before_present() {
++        assert_eq!(
++            cmp_extension_opt(None, Some(OsStr::new("rs"))),
++            Ordering::Less
++        );
++        assert_eq!(
++            cmp_extension_opt(Some(OsStr::new("rs")), None),
++            Ordering::Greater
++        );
++        assert_eq!(cmp_extension_opt(None, None), Ordering::Equal);
++        assert_eq!(
++            cmp_extension_opt(Some(OsStr::new("a")), Some(OsStr::new("b"))),
++            Ordering::Less
++        );
++    }
++
++    #[test]
++    fn empty_input_sorts_without_panic() {
++        let mut entries: Vec<DirEntry> = Vec::new();
++        sort_results(&mut entries, SortBy::Name, true);
++        assert!(entries.is_empty());
++    }
++
++    #[test]
++    fn single_element_is_stable() {
++        assert_eq!(sorted(&["only"], SortBy::Size, true), vec!["only"]);
++        assert_eq!(sorted(&["only"], SortBy::Name, false), vec!["only"]);
++    }
++}
+diff --git a/src/walk.rs b/src/walk.rs
+index 30128a0..6feecbe 100644
+--- a/src/walk.rs
++++ b/src/walk.rs
+@@ -408,6 +408,15 @@ impl WorkerState {
+     fn receive(&self, rx: Receiver<Batch>) -> ExitCode {
+         let config = &self.config;
+ 
++        // When a sort key is given, switch to fully buffered mode: collect all
++        // matching entries, sort them into a total deterministic order, apply
++        // `--max-results` truncation, and only then produce output or run
++        // commands. The streaming path below is preserved unchanged for
++        // `SortBy::None`.
++        if config.sort != crate::sort::SortBy::None {
++            return self.receive_sorted(rx);
++        }
++
+         // This will be set to `Some` if the `--exec` argument was supplied.
+         if let Some(ref cmd) = config.command {
+             if cmd.in_batch_mode() {
+@@ -439,6 +448,72 @@ impl WorkerState {
+         }
+     }
+ 
++    /// Buffered, sorted result handling. Collects every matching entry across
++    /// all search roots (ignoring `max_buffer_time`), sorts the full set with a
++    /// total, deterministic order, truncates to `--max-results`, and then
++    /// dispatches the ordered entries to the output or exec path so that
++    /// one-by-one and batch command execution follow the sort order.
++    fn receive_sorted(&self, rx: Receiver<Batch>) -> ExitCode {
++        let config = &self.config;
++
++        let mut entries: Vec<DirEntry> = Vec::new();
++        for result in rx.into_iter().flatten() {
++            match result {
++                WorkerResult::Entry(dir_entry) => {
++                    if config.quiet {
++                        // A single match is enough to determine the exit code.
++                        self.quit_flag.store(true, Ordering::Relaxed);
++                        return ExitCode::HasResults(true);
++                    }
++                    entries.push(dir_entry);
++                }
++                WorkerResult::Error(err) => {
++                    if config.show_filesystem_errors {
++                        print_error(err.to_string());
++                    }
++                }
++            }
++        }
++
++        crate::sort::sort_results(&mut entries, config.sort, config.sort_reverse);
++
++        // Sorting happens before truncation, so `--max-results N` yields the
++        // first N entries in sorted order (e.g. the N smallest for `size`).
++        if let Some(max_results) = config.max_results {
++            entries.truncate(max_results);
++        }
++
++        if config.quiet {
++            return ExitCode::HasResults(!entries.is_empty());
++        }
++
++        if let Some(ref cmd) = config.command {
++            let results = entries.into_iter().map(WorkerResult::Entry);
++            if cmd.in_batch_mode() {
++                exec::batch(results, cmd, config)
++            } else {
++                exec::job(results, cmd, config)
++            }
++        } else {
++            let stdout = io::stdout().lock();
++            let mut stdout = io::BufWriter::new(stdout);
++
++            let mut exit_code = ExitCode::HasResults(!entries.is_empty());
++            if let Err(e) = output::print_entries(&mut stdout, &entries, config)
++                && e.kind() != io::ErrorKind::BrokenPipe
++            {
++                print_error(format!("Could not write to output: {e}"));
++                exit_code = ExitCode::GeneralError;
++            }
++            let _ = stdout.flush();
++
++            if self.interrupt_flag.load(Ordering::Relaxed) {
++                return ExitCode::KilledBySigint;
++            }
++            exit_code
++        }
++    }
++
+     /// Spawn the sender threads.
+     fn spawn_senders(&self, walker: WalkParallel, tx: Sender<Batch>) {
+         walker.run(|| {

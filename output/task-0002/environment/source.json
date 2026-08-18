@@ -1,0 +1,7 @@
+{
+  "mode": "remote-pinned-checkout",
+  "repository": "ollama/ollama",
+  "base_commit_hash": "144893850fa778c8c81ff931f26614d62e6689c1",
+  "cache_path": "workspaces/repositories/ollama__ollama",
+  "remote_fetch_in_dockerfile": true
+}

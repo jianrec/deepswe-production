@@ -1,0 +1,872 @@
+diff --git a/cmd/launch/claude.go b/cmd/launch/claude.go
+index 394feef..31a9c1a 100644
+--- a/cmd/launch/claude.go
++++ b/cmd/launch/claude.go
+@@ -1,6 +1,7 @@
+ package launch
+ 
+ import (
++	"context"
+ 	"fmt"
+ 	"os"
+ 	"os/exec"
+@@ -17,6 +18,25 @@ type Claude struct{}
+ 
+ func (c *Claude) String() string { return "Claude Code" }
+ 
++// Plan returns the side-effect-free launch plan for Claude Code.
++func (c *Claude) Plan(_ context.Context, opts PlanOptions) (Plan, error) {
++	binary, err := c.findPath()
++	if err != nil {
++		binary = "claude"
++	}
++	env := envMapFromPairs(c.envVars(opts.Model))
++	if opts.Host != "" {
++		env["ANTHROPIC_BASE_URL"] = opts.Host
++	}
++	return Plan{
++		Integration: "claude",
++		Binary:      binary,
++		Args:        c.args(opts.Model, nil),
++		Env:         env,
++		Model:       opts.Model,
++	}, nil
++}
++
+ func (c *Claude) args(model string, extra []string) []string {
+ 	var args []string
+ 	if model != "" {
+diff --git a/cmd/launch/codex.go b/cmd/launch/codex.go
+index 22c3bb7..90bde05 100644
+--- a/cmd/launch/codex.go
++++ b/cmd/launch/codex.go
+@@ -1,6 +1,7 @@
+ package launch
+ 
+ import (
++	"context"
+ 	"encoding/json"
+ 	"fmt"
+ 	"os"
+@@ -20,6 +21,89 @@ type Codex struct{}
+ 
+ func (c *Codex) String() string { return "Codex" }
+ 
++// Plan returns the side-effect-free launch plan for Codex. It renders the same
++// model catalog and launch profile that ensureCodexConfig writes, but only in
++// memory, and classifies each file's action against any existing on-disk copy.
++func (c *Codex) Plan(_ context.Context, opts PlanOptions) (Plan, error) {
++	binary := "codex"
++	if p, err := exec.LookPath("codex"); err == nil {
++		binary = p
++	}
++
++	configPath := filepath.Join(opts.Home, ".codex", "config.toml")
++	catalogPath := codexModelCatalogPathForConfig(configPath)
++	profilePath := codexProfileConfigPathForConfig(configPath)
++
++	catalogData, err := codexModelCatalogContent(opts.Model, nil)
++	if err != nil {
++		return Plan{}, err
++	}
++	baseURL := strings.TrimRight(opts.Host, "/") + "/v1/"
++	profileText := codexProfileConfigText(opts.Model, catalogPath, baseURL)
++
++	args, err := c.args(opts.Model, catalogPath, nil)
++	if err != nil {
++		return Plan{}, err
++	}
++
++	files := []PlannedFile{
++		{
++			Path:     catalogPath,
++			Contents: string(catalogData),
++			Mode:     0o644,
++			Action:   classifyAction(catalogPath, string(catalogData), false),
++		},
++		{
++			Path:     profilePath,
++			Contents: profileText,
++			Mode:     0o644,
++			Action:   classifyAction(profilePath, profileText, false),
++		},
++	}
++
++	return Plan{
++		Integration: "codex",
++		Binary:      binary,
++		Args:        args,
++		Env:         map[string]string{"OPENAI_API_KEY": "ollama"},
++		Model:       opts.Model,
++		Files:       files,
++	}, nil
++}
++
++// codexModelCatalogContent renders the Codex model catalog JSON in memory,
++// byte-identical to writeCodexModelCatalog.
++func codexModelCatalogContent(modelName string, models []LaunchModel) ([]byte, error) {
++	entry := buildCodexModelEntry(codexCatalogModel(modelName, models))
++	catalog := map[string]any{
++		"models": []any{entry},
++	}
++	return json.MarshalIndent(catalog, "", "  ")
++}
++
++// codexProfileConfigText renders the Codex launch profile TOML in memory,
++// byte-identical to writeCodexNamedProfileConfig for the managed profile. The
++// provider base_url is threaded from the requested host.
++func codexProfileConfigText(model, modelCatalogPath, baseURL string) string {
++	var lines []string
++	if strings.TrimSpace(model) != "" {
++		lines = append(lines, fmt.Sprintf("%s = %q", codexRootModelKey, model))
++	}
++	lines = append(lines, fmt.Sprintf("%s = %q", codexRootModelProviderKey, codexProfileName))
++	if strings.TrimSpace(modelCatalogPath) != "" {
++		lines = append(lines, fmt.Sprintf("%s = %q", codexRootModelCatalogJSONKey, modelCatalogPath))
++	}
++	text := strings.Join(lines, "\n") + "\n\n"
++	text += strings.Join([]string{
++		codexProviderHeaderFor(codexProfileName),
++		fmt.Sprintf("name = %q", codexProviderName),
++		fmt.Sprintf("base_url = %q", baseURL),
++		`wire_api = "responses"`,
++		"",
++	}, "\n")
++	return text
++}
++
+ const (
+ 	codexProfileName           = "ollama-launch"
+ 	codexProviderName          = "Ollama"
+diff --git a/cmd/launch/copilot.go b/cmd/launch/copilot.go
+index 9914cbb..4667170 100644
+--- a/cmd/launch/copilot.go
++++ b/cmd/launch/copilot.go
+@@ -1,6 +1,7 @@
+ package launch
+ 
+ import (
++	"context"
+ 	"fmt"
+ 	"os"
+ 	"os/exec"
+@@ -15,6 +16,25 @@ type Copilot struct{}
+ 
+ func (c *Copilot) String() string { return "Copilot CLI" }
+ 
++// Plan returns the side-effect-free launch plan for Copilot CLI.
++func (c *Copilot) Plan(_ context.Context, opts PlanOptions) (Plan, error) {
++	binary, err := c.findPath()
++	if err != nil {
++		binary = "copilot"
++	}
++	env := envMapFromPairs(c.envVars(opts.Model))
++	if opts.Host != "" {
++		env["COPILOT_PROVIDER_BASE_URL"] = opts.Host + "/v1"
++	}
++	return Plan{
++		Integration: "copilot",
++		Binary:      binary,
++		Args:        c.args(opts.Model, nil),
++		Env:         env,
++		Model:       opts.Model,
++	}, nil
++}
++
+ func (c *Copilot) args(model string, extra []string) []string {
+ 	var args []string
+ 	if model != "" {
+diff --git a/cmd/launch/droid.go b/cmd/launch/droid.go
+index d28c933..4699a4e 100644
+--- a/cmd/launch/droid.go
++++ b/cmd/launch/droid.go
+@@ -1,6 +1,7 @@
+ package launch
+ 
+ import (
++	"context"
+ 	"encoding/json"
+ 	"fmt"
+ 	"os"
+@@ -40,6 +41,61 @@ type modelEntry struct {
+ 
+ func (d *Droid) String() string { return "Droid" }
+ 
++// Plan returns the side-effect-free launch plan for Droid. Droid merges its
++// managed models into ~/.factory/settings.json.
++func (d *Droid) Plan(_ context.Context, opts PlanOptions) (Plan, error) {
++	binary := "droid"
++	if p, err := exec.LookPath("droid"); err == nil {
++		binary = p
++	}
++
++	settingsPath := filepath.Join(opts.Home, ".factory", "settings.json")
++	models := planModelList(opts.Model)
++	contents, err := droidSettingsContents(settingsPath, models, opts.Host)
++	if err != nil {
++		return Plan{}, err
++	}
++
++	env := map[string]string{}
++	if opts.Host != "" {
++		env["OLLAMA_HOST"] = opts.Host
++	}
++
++	return Plan{
++		Integration: "droid",
++		Binary:      binary,
++		Env:         env,
++		Model:       opts.Model,
++		Files: []PlannedFile{{
++			Path:     settingsPath,
++			Contents: contents,
++			Mode:     0o644,
++			Action:   classifyAction(settingsPath, contents, true),
++		}},
++	}, nil
++}
++
++// droidSettingsContents renders the merged Droid settings.json in memory,
++// byte-identical to what Edit writes.
++func droidSettingsContents(settingsPath string, models []LaunchModel, host string) (string, error) {
++	settingsMap := make(map[string]any)
++	var settings droidSettings
++	if data, err := os.ReadFile(settingsPath); err == nil {
++		if err := json.Unmarshal(data, &settingsMap); err != nil {
++			return "", fmt.Errorf("failed to parse settings file: %w, at: %s", err, settingsPath)
++		}
++		json.Unmarshal(data, &settings)
++	}
++
++	settingsMap = updateDroidPlanHost(updateDroidSettings(settingsMap, settings, models), host)
++
++	data, err := json.MarshalIndent(settingsMap, "", "  ")
++	if err != nil {
++		return "", err
++	}
++	return string(data), nil
++}
++
+ func (d *Droid) Run(model string, _ []LaunchModel, args []string) error {
+ 	if _, err := exec.LookPath("droid"); err != nil {
+ 		return fmt.Errorf("droid is not installed, install from https://docs.factory.ai/cli/getting-started/quickstart")
+diff --git a/cmd/launch/launch.go b/cmd/launch/launch.go
+index db7bf37..169a159 100644
+--- a/cmd/launch/launch.go
++++ b/cmd/launch/launch.go
+@@ -276,6 +276,8 @@ func LaunchCmd(checkServerHeartbeat func(cmd *cobra.Command, args []string) erro
+ 	var configFlag bool
+ 	var yesFlag bool
+ 	var restoreFlag bool
++	var dryRunFlag bool
++	var jsonFlag bool
+ 
+ 	cmd := &cobra.Command{
+ 		Use:   "launch [INTEGRATION] [-- [EXTRA_ARGS...]]",
+@@ -316,7 +318,7 @@ Examples:
+   ollama launch codex -- --sandbox workspace-write`,
+ 		Args: cobra.ArbitraryArgs,
+ 		PreRunE: func(cmd *cobra.Command, args []string) error {
+-			if restoreFlag || launchCommandCanSkipHeartbeat(args) {
++			if restoreFlag || dryRunFlag || launchCommandCanSkipHeartbeat(args) {
+ 				return nil
+ 			}
+ 			return checkServerHeartbeat(cmd, args)
+@@ -349,13 +351,30 @@ Examples:
+ 			}
+ 
+ 			if name == "" {
+-				if cmd.Flags().Changed("model") || cmd.Flags().Changed("config") || cmd.Flags().Changed("yes") || cmd.Flags().Changed("restore") || len(passArgs) > 0 {
++				if cmd.Flags().Changed("model") || cmd.Flags().Changed("config") || cmd.Flags().Changed("yes") || cmd.Flags().Changed("restore") || cmd.Flags().Changed("dry-run") || cmd.Flags().Changed("json") || len(passArgs) > 0 {
+ 					return fmt.Errorf("flags and extra args require an integration name, for example: 'ollama launch claude --model qwen3.5'")
+ 				}
+ 				runTUI(cmd)
+ 				return nil
+ 			}
+ 
++			if dryRunFlag {
++				plan, err := BuildPlan(cmd.Context(), name, PlanOptions{Model: modelFlag})
++				if err != nil {
++					return err
++				}
++				if jsonFlag {
++					data, err := plan.JSON()
++					if err != nil {
++						return err
++					}
++					fmt.Fprintln(cmd.OutOrStdout(), string(data))
++				} else {
++					fmt.Fprint(cmd.OutOrStdout(), plan.Render())
++				}
++				return nil
++			}
++
+ 			if !restoreFlag && launchCommandIsClaudeDesktop(name) {
+ 				return errClaudeDesktopUnsupported()
+ 			}
+@@ -398,6 +417,8 @@ Examples:
+ 	cmd.Flags().BoolVar(&configFlag, "config", false, "Configure without launching")
+ 	cmd.Flags().BoolVar(&restoreFlag, "restore", false, "Restore an integration to its default profile")
+ 	cmd.Flags().BoolVarP(&yesFlag, "yes", "y", false, "Automatically answer yes to confirmation prompts")
++	cmd.Flags().BoolVar(&dryRunFlag, "dry-run", false, "Print the launch plan without configuring or executing the integration")
++	cmd.Flags().BoolVar(&jsonFlag, "json", false, "Print the launch plan as JSON (only meaningful with --dry-run)")
+ 	return cmd
+ }
+ 
+diff --git a/cmd/launch/model_inventory.go b/cmd/launch/model_inventory.go
+index 707ebe0..4928706 100644
+--- a/cmd/launch/model_inventory.go
++++ b/cmd/launch/model_inventory.go
+@@ -199,3 +199,12 @@ func launchModelsFromNames(names []string) []LaunchModel {
+ 	}
+ 	return models
+ }
++
++// planModelList resolves a single model name into the LaunchModel slice used by
++// integration Plan methods. It returns nil for an empty model name.
++func planModelList(model string) []LaunchModel {
++	if model == "" {
++		return nil
++	}
++	return launchModelsFromNames([]string{model})
++}
+diff --git a/cmd/launch/models.go b/cmd/launch/models.go
+index 37afb6c..15fca55 100644
+--- a/cmd/launch/models.go
++++ b/cmd/launch/models.go
+@@ -153,6 +153,16 @@ const (
+ 	missingModelFail
+ )
+ 
++// launchDefaultModelName returns the first recommended model, used as the final
++// fallback in launch plan model resolution (after --model and
++// OLLAMA_LAUNCH_MODEL).
++func launchDefaultModelName() string {
++	if len(recommendedModels) > 0 {
++		return recommendedModels[0].Name
++	}
++	return ""
++}
++
+ // OpenBrowser opens the URL in the user's browser.
+ func OpenBrowser(url string) {
+ 	switch runtime.GOOS {
+diff --git a/cmd/launch/opencode.go b/cmd/launch/opencode.go
+index 1f38666..7598db9 100644
+--- a/cmd/launch/opencode.go
++++ b/cmd/launch/opencode.go
+@@ -1,6 +1,7 @@
+ package launch
+ 
+ import (
++	"context"
+ 	"encoding/json"
+ 	"fmt"
+ 	"os"
+@@ -27,6 +28,97 @@ type OpenCode struct {
+ 
+ func (o *OpenCode) String() string { return "OpenCode" }
+ 
++// Plan returns the side-effect-free launch plan for OpenCode. Configuration is
++// passed through OPENCODE_CONFIG_CONTENT and the model state file is merged.
++func (o *OpenCode) Plan(_ context.Context, opts PlanOptions) (Plan, error) {
++	binary, ok := findOpenCode()
++	if !ok {
++		binary = "opencode"
++	}
++
++	models := planModelList(opts.Model)
++	if len(models) == 0 {
++		return Plan{}, fmt.Errorf("opencode plan requires a model")
++	}
++
++	content, err := buildInlineConfig(models[0], models)
++	if err != nil {
++		return Plan{}, err
++	}
++
++	env := map[string]string{}
++	if content != "" {
++		env["OPENCODE_CONFIG_CONTENT"] = content
++	}
++
++	plan := Plan{
++		Integration: "opencode",
++		Binary:      binary,
++		Env:         env,
++		Model:       opts.Model,
++	}
++
++	if statePath, serr := openCodeStatePath(); serr == nil {
++		if contents, cerr := openCodeStateContents(statePath, []string{opts.Model}); cerr == nil {
++			plan.Files = append(plan.Files, PlannedFile{
++				Path:     statePath,
++				Contents: contents,
++				Mode:     0o644,
++				Action:   classifyAction(statePath, contents, true),
++			})
++		}
++	}
++
++	return plan, nil
++}
++
++// openCodeStateContents renders the OpenCode model state file in memory,
++// merging the requested models into any existing recent list.
++func openCodeStateContents(statePath string, modelList []string) (string, error) {
++	state := map[string]any{
++		"recent":   []any{},
++		"favorite": []any{},
++		"variant":  map[string]any{},
++	}
++	if data, err := os.ReadFile(statePath); err == nil {
++		_ = json.Unmarshal(data, &state)
++	}
++
++	recent, _ := state["recent"].([]any)
++
++	modelSet := make(map[string]bool)
++	for _, m := range modelList {
++		modelSet[m] = true
++	}
++
++	newRecent := slices.DeleteFunc(slices.Clone(recent), func(entry any) bool {
++		e, ok := entry.(map[string]any)
++		if !ok || e["providerID"] != "ollama" {
++			return false
++		}
++		modelID, _ := e["modelID"].(string)
++		return modelSet[modelID]
++	})
++
++	for _, model := range slices.Backward(modelList) {
++		newRecent = slices.Insert(newRecent, 0, any(map[string]any{
++			"providerID": "ollama",
++			"modelID":    model,
++		}))
++	}
++
++	const maxRecentModels = 10
++	newRecent = newRecent[:min(len(newRecent), maxRecentModels)]
++
++	state["recent"] = newRecent
++
++	data, err := json.MarshalIndent(state, "", "  ")
++	if err != nil {
++		return "", err
++	}
++	return string(data), nil
++}
++
+ // findOpenCode returns the opencode binary path, checking PATH first then the
+ // curl installer location (~/.opencode/bin) which may not be on PATH yet.
+ func findOpenCode() (string, bool) {
+diff --git a/cmd/launch/plan.go b/cmd/launch/plan.go
+new file mode 100644
+index 0000000..218c451
+--- /dev/null
++++ b/cmd/launch/plan.go
+@@ -0,0 +1,214 @@
++package launch
++
++import (
++	"context"
++	"encoding/json"
++	"fmt"
++	"io/fs"
++	"os"
++	"os/exec"
++	"path/filepath"
++	"sort"
++	"strings"
++
++	"github.com/ollama/ollama/envconfig"
++)
++
++// FileAction describes what applying a PlannedFile would do to the filesystem.
++type FileAction string
++
++const (
++	FileCreate    FileAction = "create"
++	FileMerge     FileAction = "merge"
++	FileOverwrite FileAction = "overwrite"
++	FileUnchanged FileAction = "unchanged"
++)
++
++// PlannedFile describes a single config file a launch plan would materialize.
++type PlannedFile struct {
++	Path     string      `json:"path"`
++	Contents string      `json:"contents"`
++	Mode     fs.FileMode `json:"mode"`
++	Action   FileAction  `json:"action"`
++}
++
++// Plan is a side-effect-free description of what `ollama launch` would do.
++type Plan struct {
++	Integration string            `json:"integration"`
++	Binary      string            `json:"binary"`
++	Args        []string          `json:"args"`
++	Env         map[string]string `json:"env"`
++	Model       string            `json:"model"`
++	Files       []PlannedFile     `json:"files"`
++	Notes       []string          `json:"notes,omitempty"`
++}
++
++// PlanOptions controls how a plan is computed.
++type PlanOptions struct {
++	Model string
++	Home  string
++	Host  string
++}
++
++// Planner is implemented by integrations that can compute a launch Plan.
++type Planner interface {
++	Plan(ctx context.Context, opts PlanOptions) (Plan, error)
++}
++
++// resolvePlanModel resolves the model precedence: --model, then
++// OLLAMA_LAUNCH_MODEL, then the existing default recommendation.
++func resolvePlanModel(explicit string) string {
++	if strings.TrimSpace(explicit) != "" {
++		return explicit
++	}
++	if m := envconfig.LaunchModel(); m != "" {
++		return m
++	}
++	return launchDefaultModelName()
++}
++
++// resolveBinary resolves a command name to an absolute path when it exists on
++// PATH, falling back to the bare command name otherwise.
++func resolveBinary(name string) string {
++	if p, err := exec.LookPath(name); err == nil {
++		return p
++	}
++	return name
++}
++
++// genericPlan builds a resolved-model-only plan for integrations that do not
++// implement Planner, so BuildPlan never fails for a registered name. The plan
++// still carries the target OLLAMA host and a usable binary name.
++func genericPlan(name string, runner Runner, opts PlanOptions) Plan {
++	env := map[string]string{}
++	if opts.Host != "" {
++		env["OLLAMA_HOST"] = opts.Host
++	}
++	var args []string
++	if opts.Model != "" {
++		args = append(args, "--model", opts.Model)
++	}
++	return Plan{
++		Integration: name,
++		Binary:      resolveBinary(name),
++		Args:        args,
++		Env:         env,
++		Model:       opts.Model,
++		Notes:       []string{fmt.Sprintf("%s does not expose a detailed launch plan; resolved model only", runner.String())},
++	}
++}
++
++// classifyAction decides the action for a file without modifying it. It reads
++// the existing file (if present) and compares final contents so callers never
++// need to touch the filesystem to know whether a launch would change it.
++func classifyAction(path, contents string, merge bool) FileAction {
++	existing, err := os.ReadFile(path)
++	if err != nil {
++		return FileCreate
++	}
++	if string(existing) == contents {
++		return FileUnchanged
++	}
++	if merge {
++		return FileMerge
++	}
++	return FileOverwrite
++}
++
++// Render returns a deterministic human-readable description of the plan.
++func (p Plan) Render() string {
++	var b strings.Builder
++	fmt.Fprintf(&b, "Integration: %s\n", p.Integration)
++	fmt.Fprintf(&b, "Model:       %s\n", p.Model)
++	fmt.Fprintf(&b, "Binary:      %s\n", p.Binary)
++	fmt.Fprintf(&b, "Args:        %s\n", strings.Join(p.Args, " "))
++
++	b.WriteString("Env:\n")
++	for _, k := range sortedEnvKeys(p.Env) {
++		fmt.Fprintf(&b, "  %s=%s\n", k, p.Env[k])
++	}
++
++	if len(p.Files) > 0 {
++		b.WriteString("Files:\n")
++		for _, f := range sortedPlannedFiles(p.Files) {
++			fmt.Fprintf(&b, "  [%s] %s (mode %o)\n", f.Action, f.Path, uint32(f.Mode.Perm()))
++		}
++	}
++
++	for _, note := range p.Notes {
++		fmt.Fprintf(&b, "Note: %s\n", note)
++	}
++	return b.String()
++}
++
++// JSON returns the plan as deterministic JSON. Map keys are emitted in sorted
++// order by encoding/json, and the Files slice is preserved in the order the
++// caller supplied so the value round-trips exactly. BuildPlan is responsible
++// for producing files in stable sorted order.
++func (p Plan) JSON() ([]byte, error) {
++	if p.Env == nil {
++		p.Env = map[string]string{}
++	}
++	return json.MarshalIndent(p, "", "  ")
++}
++
++// Apply materializes the plan's files and execs its binary. Files marked
++// unchanged are skipped so applying a freshly built plan reproduces the
++// pre-change on-disk and environment results exactly.
++func (p Plan) Apply(ctx context.Context) error {
++	for _, f := range sortedPlannedFiles(p.Files) {
++		if f.Action == FileUnchanged {
++			continue
++		}
++		if err := os.MkdirAll(filepath.Dir(f.Path), 0o755); err != nil {
++			return err
++		}
++		if err := os.WriteFile(f.Path, []byte(f.Contents), f.Mode); err != nil {
++			return err
++		}
++	}
++
++	if p.Binary == "" {
++		return nil
++	}
++
++	cmd := exec.CommandContext(ctx, p.Binary, p.Args...)
++	cmd.Stdin = os.Stdin
++	cmd.Stdout = os.Stdout
++	cmd.Stderr = os.Stderr
++	cmd.Env = append(os.Environ(), envSlice(p.Env)...)
++	return cmd.Run()
++}
++
++func envMapFromPairs(pairs []string) map[string]string {
++	env := make(map[string]string, len(pairs))
++	for _, pair := range pairs {
++		k, v, _ := strings.Cut(pair, "=")
++		env[k] = v
++	}
++	return env
++}
++
++func envSlice(env map[string]string) []string {
++	out := make([]string, 0, len(env))
++	for _, k := range sortedEnvKeys(env) {
++		out = append(out, k+"="+env[k])
++	}
++	return out
++}
++
++func sortedEnvKeys(m map[string]string) []string {
++	keys := make([]string, 0, len(m))
++	for k := range m {
++		keys = append(keys, k)
++	}
++	sort.Strings(keys)
++	return keys
++}
++
++func sortedPlannedFiles(files []PlannedFile) []PlannedFile {
++	out := make([]PlannedFile, len(files))
++	copy(out, files)
++	sort.SliceStable(out, func(i, j int) bool { return out[i].Path < out[j].Path })
++	return out
++}
+diff --git a/cmd/launch/qwen_plan.go b/cmd/launch/qwen_plan.go
+new file mode 100644
+index 0000000..54e878f
+--- /dev/null
++++ b/cmd/launch/qwen_plan.go
+@@ -0,0 +1,34 @@
++package launch
++
++import "context"
++
++// Plan returns the side-effect-free launch plan for Qwen Code. Qwen is pointed
++// at the local Ollama server through OpenAI-compatible environment variables.
++func (q *Qwen) Plan(_ context.Context, opts PlanOptions) (Plan, error) {
++	binary := "qwen"
++	if p, err := q.findPath(); err == nil {
++		binary = p
++	}
++
++	var args []string
++	if opts.Model != "" {
++		args = append(args, "--model", opts.Model)
++	}
++
++	env := map[string]string{}
++	if opts.Host != "" {
++		env["OPENAI_BASE_URL"] = opts.Host + "/v1"
++		env["OPENAI_API_KEY"] = "ollama"
++		if opts.Model != "" {
++			env["OPENAI_MODEL"] = opts.Model
++		}
++	}
++
++	return Plan{
++		Integration: "qwen",
++		Binary:      binary,
++		Args:        args,
++		Env:         env,
++		Model:       opts.Model,
++	}, nil
++}
+diff --git a/cmd/launch/registry.go b/cmd/launch/registry.go
+index 52c93a2..3dc44cd 100644
+--- a/cmd/launch/registry.go
++++ b/cmd/launch/registry.go
+@@ -1,11 +1,15 @@
+ package launch
+ 
+ import (
++	"context"
+ 	"fmt"
+ 	"os"
+ 	"os/exec"
+ 	"slices"
++	"sort"
+ 	"strings"
++
++	"github.com/ollama/ollama/envconfig"
+ )
+ 
+ // IntegrationInstallSpec describes how launcher should detect and guide installation.
+@@ -521,3 +525,77 @@ func EnsureIntegrationInstalled(name string, runner Runner) error {
+ 		return fmt.Errorf("%s is not installed", runner)
+ 	}
+ }
++
++// BuildPlan computes the launch Plan for a registered integration without
++// writing any file, creating any directory, or executing any process. Unknown
++// integration names return a clear error rather than panicking. A canceled
++// context is honored before any planning work is performed.
++func BuildPlan(ctx context.Context, name string, opts PlanOptions) (Plan, error) {
++	if ctx != nil {
++		if err := ctx.Err(); err != nil {
++			return Plan{}, err
++		}
++	}
++
++	canonical, runner, err := LookupIntegration(name)
++	if err != nil {
++		return Plan{}, err
++	}
++
++	if opts.Home == "" {
++		if home, herr := os.UserHomeDir(); herr == nil {
++			opts.Home = home
++		}
++	}
++	if opts.Host == "" {
++		opts.Host = strings.TrimRight(envconfig.Host().String(), "/")
++	}
++	opts.Model = resolvePlanModel(opts.Model)
++
++	var plan Plan
++	if planner, ok := runner.(Planner); ok {
++		plan, err = planner.Plan(ctx, opts)
++		if err != nil {
++			return Plan{}, err
++		}
++	} else {
++		plan = genericPlan(canonical, runner, opts)
++	}
++
++	if plan.Integration == "" {
++		plan.Integration = canonical
++	}
++	if plan.Binary == "" {
++		plan.Binary = resolveBinary(canonical)
++	}
++	if plan.Model == "" {
++		plan.Model = opts.Model
++	}
++
++	if plan.Args == nil {
++		plan.Args = []string{}
++	}
++	if plan.Env == nil {
++		plan.Env = map[string]string{}
++	}
++	if plan.Notes == nil {
++		plan.Notes = []string{}
++	}
++	if opts.Host != "" {
++		if _, ok := plan.Env["OLLAMA_HOST"]; !ok {
++			plan.Env["OLLAMA_HOST"] = opts.Host
++		}
++	}
++	plan.Files = sortedPlannedFiles(plan.Files)
++	return plan, nil
++}
++
++// RegisteredIntegrations returns the sorted set of canonical integration names.
++func RegisteredIntegrations() []string {
++	names := make([]string, 0, len(integrationSpecs))
++	for _, spec := range integrationSpecs {
++		names = append(names, spec.Name)
++	}
++	sort.Strings(names)
++	return names
++}
+diff --git a/envconfig/launch.go b/envconfig/launch.go
+new file mode 100644
+index 0000000..b86618c
+--- /dev/null
++++ b/envconfig/launch.go
+@@ -0,0 +1,10 @@
++package envconfig
++
++import "os"
++
++// LaunchModel returns the default model used by `ollama launch` plans and
++// launches when no --model flag is provided. It reads OLLAMA_LAUNCH_MODEL so
++// that plans are deterministic offline.
++func LaunchModel() string {
++	return os.Getenv("OLLAMA_LAUNCH_MODEL")
++}
+diff --git a/cmd/launch/droid_plan.go b/cmd/launch/droid_plan.go
+new file mode 100644
+--- /dev/null
++++ b/cmd/launch/droid_plan.go
+@@ -0,0 +1,30 @@
++package launch
++
++import "strings"
++
++func updateDroidPlanHost(settings map[string]any, host string) map[string]any {
++	baseURL := strings.TrimRight(strings.TrimSpace(host), "/")
++	if baseURL == "" {
++		return settings
++	}
++	baseURL += "/v1"
++
++	models, ok := settings["customModels"].([]any)
++	if !ok {
++		return settings
++	}
++	for index, raw := range models {
++		switch model := raw.(type) {
++		case modelEntry:
++			if model.APIKey == "ollama" {
++				model.BaseURL = baseURL
++				models[index] = model
++			}
++		case map[string]any:
++			if model["apiKey"] == "ollama" {
++				model["baseUrl"] = baseURL
++			}
++		}
++	}
++	return settings
++}

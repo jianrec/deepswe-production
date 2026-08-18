@@ -1,0 +1,20 @@
+[author]
+provider = "packy-anthropic"
+model = "claude-opus-4-8"
+execution = "anthropic-messages"
+base_url = "https://www.packyapi.com"
+api_key_env = "ANTHROPIC_API_KEY"
+base_url_env = "ANTHROPIC_BASE_URL"
+model_env = "ANTHROPIC_MODEL"
+
+[tests]
+provider = "packy-responses"
+model = "gpt-5.6-sol"
+base_url = "https://www.packyapi.com/v1"
+env_file = ""
+api_key_env = "PACKY_RESPONSES_API_KEY"
+base_url_env = "PACKY_RESPONSES_BASE_URL"
+model_env = "HIDDEN_TEST_MODEL"
+api_mode_env = "HIDDEN_TEST_API_MODE"
+
+# Do not put a key in this file. Pass a protected env file to the runner.

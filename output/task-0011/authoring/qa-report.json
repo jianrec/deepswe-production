@@ -1,0 +1,229 @@
+{
+  "status": "passed",
+  "checked_at": "2026-08-14T06:18:18.310875+00:00",
+  "static": {
+    "oracle_patch_apply": true,
+    "hidden_test_patch_apply": true,
+    "source_file_count": 10,
+    "changed_lines": 827,
+    "f2p_total": 48,
+    "p2p_total": 214,
+    "model_apply_stderr": "",
+    "test_apply_stderr": "",
+    "static_validation": true,
+    "static_validation_output": "{\"task\": \"/Users/zhoujian/Desktop/实习项目/coding训练语料/deepswe/deepswe-archive-20260813/tasks/task-0011\", \"valid\": true, \"errors\": []}\n"
+  },
+  "docker_available": true,
+  "docker": {
+    "network_mode": "no-network",
+    "image": "deepswe-task-0011-tests:beca84e600e4",
+    "image_metadata": {
+      "build_mode": "local_pinned_checkout",
+      "build_elapsed_seconds": 51.791,
+      "verifier": {
+        "id": "sha256:21adc406d31bed06bb42bd5ca3bd37c7ef4d600ba46ce7f0e89d3516d1f94815",
+        "repo_tags": [
+          "deepswe-task-0011-tests:beca84e600e4"
+        ],
+        "labels": {
+          "deepswe.base_sha": "beca84e600e4e250f6b244d22878e72948f331c7",
+          "deepswe.repository": "pmndrs/zustand",
+          "deepswe.source_mode": "local-pinned-checkout"
+        }
+      },
+      "environment": {
+        "id": "sha256:c34b25b04eb3fdef7f2c8bb48230357d181414dc8e8e33f70785f7769746bc75",
+        "repo_tags": [
+          "deepswe-task-0011-environment:beca84e600e4"
+        ],
+        "labels": {
+          "deepswe.base_sha": "beca84e600e4e250f6b244d22878e72948f331c7",
+          "deepswe.repository": "pmndrs/zustand",
+          "deepswe.source_mode": "local-pinned-checkout"
+        }
+      },
+      "hidden_test_isolation": true
+    },
+    "base_preflight": {
+      "returncode": 0,
+      "reward": {
+        "reward": 0,
+        "f2p_total": 48,
+        "f2p_passed": 0,
+        "p2p_total": 200,
+        "p2p_passed": 200,
+        "f2p": 0.0,
+        "p2p": 1.0,
+        "partial": 0.8064516129032258
+      },
+      "elapsed_seconds": 36.872,
+      "stdout_tail": "Reused completed QA case with matching input fingerprint.",
+      "stderr_tail": "",
+      "reused": true
+    },
+    "base_preflight_ok": true,
+    "nop": [
+      {
+        "returncode": 0,
+        "reward": {
+          "reward": 0,
+          "f2p_total": 48,
+          "f2p_passed": 0,
+          "p2p_total": 200,
+          "p2p_passed": 200,
+          "f2p": 0.0,
+          "p2p": 1.0,
+          "partial": 0.8064516129032258
+        },
+        "elapsed_seconds": 32.697,
+        "stdout_tail": "Reused completed QA case with matching input fingerprint.",
+        "stderr_tail": "",
+        "reused": true
+      },
+      {
+        "returncode": 0,
+        "reward": {
+          "reward": 0,
+          "f2p_total": 48,
+          "f2p_passed": 0,
+          "p2p_total": 200,
+          "p2p_passed": 200,
+          "f2p": 0.0,
+          "p2p": 1.0,
+          "partial": 0.8064516129032258
+        },
+        "elapsed_seconds": 28.779,
+        "stdout_tail": "Reused completed QA case with matching input fingerprint.",
+        "stderr_tail": "",
+        "reused": true
+      },
+      {
+        "returncode": 0,
+        "reward": {
+          "reward": 0,
+          "f2p_total": 48,
+          "f2p_passed": 0,
+          "p2p_total": 200,
+          "p2p_passed": 200,
+          "f2p": 0.0,
+          "p2p": 1.0,
+          "partial": 0.8064516129032258
+        },
+        "elapsed_seconds": 33.632,
+        "stdout_tail": "Reused completed QA case with matching input fingerprint.",
+        "stderr_tail": "",
+        "reused": true
+      }
+    ],
+    "oracle": [
+      {
+        "returncode": 0,
+        "reward": {
+          "reward": 1,
+          "f2p_total": 48,
+          "f2p_passed": 48,
+          "p2p_total": 200,
+          "p2p_passed": 200,
+          "f2p": 1.0,
+          "p2p": 1.0,
+          "partial": 1.0
+        },
+        "elapsed_seconds": 15.982,
+        "stdout_tail": "Reused completed QA case with matching input fingerprint.",
+        "stderr_tail": "",
+        "reused": true
+      },
+      {
+        "returncode": 0,
+        "reward": {
+          "reward": 1,
+          "f2p_total": 48,
+          "f2p_passed": 48,
+          "p2p_total": 200,
+          "p2p_passed": 200,
+          "f2p": 1.0,
+          "p2p": 1.0,
+          "partial": 1.0
+        },
+        "elapsed_seconds": 17.18,
+        "stdout_tail": "Reused completed QA case with matching input fingerprint.",
+        "stderr_tail": "",
+        "reused": true
+      },
+      {
+        "returncode": 0,
+        "reward": {
+          "reward": 1,
+          "f2p_total": 48,
+          "f2p_passed": 48,
+          "p2p_total": 200,
+          "p2p_passed": 200,
+          "f2p": 1.0,
+          "p2p": 1.0,
+          "partial": 1.0
+        },
+        "elapsed_seconds": 17.286,
+        "stdout_tail": "Reused completed QA case with matching input fingerprint.",
+        "stderr_tail": "",
+        "reused": true
+      }
+    ],
+    "mutants": [
+      {
+        "returncode": 0,
+        "reward": {
+          "reward": 0,
+          "f2p_total": 48,
+          "f2p_passed": 10,
+          "p2p_total": 200,
+          "p2p_passed": 58,
+          "f2p": 0.20833333333333334,
+          "p2p": 0.29,
+          "partial": 0.27419354838709675
+        },
+        "elapsed_seconds": 24.944,
+        "stdout_tail": "Reused completed QA case with matching input fingerprint.",
+        "stderr_tail": "",
+        "reused": true
+      },
+      {
+        "returncode": 0,
+        "reward": {
+          "reward": 0,
+          "f2p_total": 48,
+          "f2p_passed": 10,
+          "p2p_total": 200,
+          "p2p_passed": 200,
+          "f2p": 0.20833333333333334,
+          "p2p": 1.0,
+          "partial": 0.8467741935483871
+        },
+        "elapsed_seconds": 16.73,
+        "stdout_tail": "Reused completed QA case with matching input fingerprint.",
+        "stderr_tail": "",
+        "reused": true
+      },
+      {
+        "returncode": 0,
+        "reward": {
+          "reward": 0,
+          "f2p_total": 48,
+          "f2p_passed": 38,
+          "p2p_total": 200,
+          "p2p_passed": 91,
+          "f2p": 0.7916666666666666,
+          "p2p": 0.455,
+          "partial": 0.5201612903225806
+        },
+        "elapsed_seconds": 22.975,
+        "stdout_tail": "Reused completed QA case with matching input fingerprint.",
+        "stderr_tail": "",
+        "reused": true
+      }
+    ],
+    "nop_ok": true,
+    "oracle_ok": true,
+    "mutant_ok": true,
+    "passed": true
+  }
+}

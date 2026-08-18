@@ -1,0 +1,976 @@
+diff --git a/agent/billing_view.py b/agent/billing_view.py
+index 01a804e..8f98e2c 100644
+--- a/agent/billing_view.py
++++ b/agent/billing_view.py
+@@ -509,3 +509,37 @@ def validate_charge_amount(
+     if max_usd is not None and amount > max_usd:
+         return AmountValidation(ok=False, error=f"Maximum is {format_money(max_usd)}")
+     return AmountValidation(ok=True, amount=amount)
++
++
++# =============================================================================
++# Spend-budget status line (Phase 4 surfacing)
++# =============================================================================
++
++
++def build_budget_lines(tracker: Any, *, use_color: bool = True) -> list[str]:
++    """Render compact per-scope budget status lines for the billing view.
++
++    Returns ``[]`` when *tracker* is None or budgets are disabled (empty
++    snapshot), so a caller that joins on newlines produces byte-for-byte the
++    same output it does today. Fail-open: any error → no lines.
++    """
++    if tracker is None:
++        return []
++    try:
++        snapshot = tracker.snapshot()
++    except Exception:
++        logger.debug("billing ▸ budget snapshot failed (fail-open)", exc_info=True)
++        return []
++    if not snapshot:
++        return []
++    try:
++        from agent.spend_budget import format_budget_status
++    except Exception:
++        return []
++    lines: list[str] = []
++    for scope in ("session", "daily", "total"):
++        status = snapshot.get(scope)
++        if status is None:
++            continue
++        lines.append(format_budget_status(status, use_color=use_color))
++    return lines
+diff --git a/agent/credits_tracker.py b/agent/credits_tracker.py
+index b47c3f2..5cb933e 100644
+--- a/agent/credits_tracker.py
++++ b/agent/credits_tracker.py
+@@ -178,6 +178,98 @@ CREDITS_USAGE_KEY = "credits.usage"  # single key for the escalating usage notic
+ GRANT_UNSPENT_MIN_MICROS = 10_000
+ 
+ 
++# ── Spend-budget integration (additive; fully no-op unless budget.enabled) ───
++# Everything below is gated on parse_budget_config returning a non-empty list,
++# which only happens when budget.enabled is truthy. With budgets disabled the
++# credits path above is untouched: no tracker is built and no cost is computed.
++_budget_tracker: Any = None
++_budget_tracker_key: Any = None
++
++
++def _resolve_budget_config(config: Any) -> Optional[dict]:
++    """Extract the ``budget.*`` mapping from a resolved config, nested or flat."""
++    if not isinstance(config, Mapping):
++        return None
++    nested = config.get("budget")
++    if isinstance(nested, Mapping):
++        return dict(nested)
++    flat: dict = {}
++    prefix = "budget."
++    for key, value in config.items():
++        if isinstance(key, str) and key.startswith(prefix):
++            flat[key[len(prefix):]] = value
++    return flat or None
++
++
++def get_budget_tracker(config: Any, *, clock: Any = None):
++    """Lazily build (and cache) a process SpendBudgetTracker from config.
++
++    Returns None when budgets are disabled or misconfigured. The cache is keyed
++    on the parsed limits so a config change rebuilds the tracker.
++    """
++    global _budget_tracker, _budget_tracker_key
++    try:
++        from agent.spend_budget import SpendBudgetTracker, parse_budget_config
++    except Exception:
++        return None
++    limits = parse_budget_config(_resolve_budget_config(config))
++    if not limits:
++        _budget_tracker = None
++        _budget_tracker_key = None
++        return None
++    key = tuple((lim.scope, lim.limit_usd, lim.warn_ratio) for lim in limits)
++    if _budget_tracker is None or key != _budget_tracker_key:
++        _budget_tracker = SpendBudgetTracker(limits, clock=clock)
++        _budget_tracker_key = key
++    return _budget_tracker
++
++
++def record_turn_budget(
++    usage: Any,
++    pricing: Any,
++    config: Any,
++    *,
++    session_id: Optional[str] = None,
++    emit: Any = None,
++    clock: Any = None,
++) -> list:
++    """Record one turn's USD spend into the budget tracker and emit events.
++
++    No-op (returns ``[]``) when budgets are disabled. ``emit`` is the existing
++    monitoring emitter callable ``emit(event_name, payload)``; when supplied,
++    each non-reset BudgetEvent is forwarded as a ``budget.threshold`` payload.
++    Fail-open on emit errors so a telemetry hiccup never blocks a turn.
++    """
++    tracker = get_budget_tracker(config, clock=clock)
++    if tracker is None:
++        return []
++    try:
++        from agent.usage_pricing import turn_cost_usd
++        cost = turn_cost_usd(usage, pricing)
++    except Exception:
++        cost = 0.0
++    events: list = []
++    for scope in ("session", "daily", "total"):
++        events.extend(tracker.record_usage(scope=scope, cost_usd=cost, session_id=session_id))
++    if events and emit is not None:
++        try:
++            from agent.monitoring.events import (
++                BUDGET_THRESHOLD_EVENT,
++                budget_threshold_payload,
++            )
++            for event in events:
++                if event.kind == "reset":
++                    continue
++                payload = budget_threshold_payload(event, session_id=session_id)
++                try:
++                    emit({"event": BUDGET_THRESHOLD_EVENT, **payload})
++                except TypeError:
++                    emit(BUDGET_THRESHOLD_EVENT, payload)
++        except Exception:
++            logger.debug("budget ▸ threshold emit failed (fail-open)", exc_info=True)
++    return events
++
++
+ def new_credits_latch() -> dict:
+     """Fresh notice latch in the shape :func:`evaluate_credits_notices` expects.
+ 
+diff --git a/agent/display.py b/agent/display.py
+index d6bea7e..a40d8b2 100644
+--- a/agent/display.py
++++ b/agent/display.py
+@@ -29,6 +29,21 @@ logger = logging.getLogger(__name__)
+ _ANSI_RESET = "\033[0m"
+ 
+ 
++def format_budget_display(status: Any, *, use_color: bool = True) -> str:
++    """Display-surface formatter for a single budget status.
++
++    Thin passthrough to :func:`agent.spend_budget.format_budget_status` so
++    display callers need not import the budget module directly. Additive and
++    only invoked when budgets are enabled — the disabled display path, and
++    thus existing output, is unchanged. Fail-open to an empty string.
++    """
++    try:
++        from agent.spend_budget import format_budget_status
++        return format_budget_status(status, use_color=use_color)
++    except Exception:
++        return ""
++
++
+ def _display_url(value: Any) -> str:
+     """Extract a display-only URL without assuming model argument types."""
+     if isinstance(value, dict):
+diff --git a/agent/monitoring/events.py b/agent/monitoring/events.py
+index a17f4a4..3f7e200 100644
+--- a/agent/monitoring/events.py
++++ b/agent/monitoring/events.py
+@@ -12,6 +12,32 @@ from dataclasses import dataclass, field, asdict
+ from typing import Any, Dict, Optional
+ 
+ 
++BUDGET_THRESHOLD_EVENT: str = "budget.threshold"
++
++
++def budget_threshold_payload(event: object, *, session_id: object = None) -> dict:
++    """Map a budget event to its redaction-safe monitoring payload."""
++
++    def _num(name: str) -> float:
++        try:
++            return float(getattr(event, name, 0.0) or 0.0)
++        except (TypeError, ValueError):
++            return 0.0
++
++    payload = {
++        "scope": str(getattr(event, "scope", "")),
++        "kind": str(getattr(event, "kind", "")),
++        "spent_usd": _num("spent_usd"),
++        "limit_usd": _num("limit_usd"),
++        "ratio": _num("ratio"),
++        "session_id": session_id,
++        "ts": _num("ts"),
++    }
++    from agent.monitoring.redaction import redact_budget_payload
++
++    return redact_budget_payload(payload)
++
++
+ def _now_ns() -> int:
+     return time.time_ns()
+ 
+@@ -80,6 +106,8 @@ class CronExecutionEvent:
+ 
+ 
+ __all__ = [
++    "BUDGET_THRESHOLD_EVENT",
++    "budget_threshold_payload",
+     "GatewayHealthEvent",
+     "GatewayDiagnosticEvent",
+     "CronExecutionEvent",
+diff --git a/agent/monitoring/redaction.py b/agent/monitoring/redaction.py
+index 3128759..b5217b7 100644
+--- a/agent/monitoring/redaction.py
++++ b/agent/monitoring/redaction.py
+@@ -18,7 +18,8 @@ remains available for a future, explicitly gated redacted-message detail mode.
+ from __future__ import annotations
+ 
+ import re
+-from typing import Optional
++import math
++from typing import Any, Mapping, Optional
+ 
+ # ── secret shapes (belt-and-suspenders on top of agent/redact.py) ───────────
+ _BEARER_RE = re.compile(r"\bBearer\s+[A-Za-z0-9._~+\-/]+=*", re.IGNORECASE)
+@@ -66,6 +67,37 @@ def redact_for_export(text: Optional[str]) -> Optional[str]:
+     return out
+ 
+ 
++def redact_budget_payload(payload: Mapping[str, Any] | None) -> dict[str, Any]:
++    """Return the allow-listed, redacted ``budget.threshold`` payload."""
++    source = payload if isinstance(payload, Mapping) else {}
++    scope = str(source.get("scope", ""))
++    kind = str(source.get("kind", ""))
++    if scope not in {"session", "daily", "total"}:
++        scope = "unknown"
++    if kind not in {"warn", "exceeded", "reset"}:
++        kind = "unknown"
++
++    def _number(key: str) -> float:
++        try:
++            value = float(source.get(key, 0.0) or 0.0)
++        except (TypeError, ValueError):
++            return 0.0
++        return value if math.isfinite(value) else 0.0
++
++    raw_session_id = source.get("session_id")
++    session_id = None if raw_session_id is None else redact_for_export(str(raw_session_id))
++    return {
++        "scope": scope,
++        "kind": kind,
++        "spent_usd": _number("spent_usd"),
++        "limit_usd": _number("limit_usd"),
++        "ratio": _number("ratio"),
++        "session_id": session_id,
++        "ts": _number("ts"),
++    }
++
++
+ __all__ = [
++    "redact_budget_payload",
+     "redact_for_export",
+ ]
+diff --git a/agent/spend_budget.py b/agent/spend_budget.py
+new file mode 100644
+index 0000000..4759409
+--- /dev/null
++++ b/agent/spend_budget.py
+@@ -0,0 +1,303 @@
++"""Deterministic spend-budget subsystem for Hermes.
++
++Operators configure one or more USD budgets scoped to ``session``, ``daily``,
++or ``total``. As turns finalize, per-turn USD cost (derived from the existing
++usage/pricing path) is accumulated per scope. Crossing a warn threshold
++(default 80% of the limit) emits a one-shot ``warn`` event; reaching or
++exceeding the limit emits a one-shot ``exceeded`` event. The ``daily`` scope
++resets at the local-midnight boundary using an injectable clock so behaviour
++is deterministic under test.
++
++This module is pure, dependency-free, and side-effect-free: it never performs
++I/O, never imports agent runtime code, and all monetary math is float USD.
++Ratios are clamped to ``[0, +inf)`` and formatting is locale-independent.
++"""
++
++from __future__ import annotations
++
++import logging
++import math
++import time
++from dataclasses import dataclass
++from typing import Any, Callable, Mapping, Optional
++
++logger = logging.getLogger(__name__)
++
++SCOPES = ("session", "daily", "total")
++
++
++@dataclass(frozen=True)
++class BudgetLimit:
++    scope: str
++    limit_usd: float
++    warn_ratio: float = 0.8
++
++
++@dataclass(frozen=True)
++class BudgetStatus:
++    scope: str
++    spent_usd: float
++    limit_usd: float
++    ratio: float
++    remaining_usd: float
++    warned: bool
++    exceeded: bool
++
++
++@dataclass(frozen=True)
++class BudgetEvent:
++    kind: str  # 'warn' | 'exceeded' | 'reset'
++    scope: str
++    spent_usd: float
++    limit_usd: float
++    ratio: float
++    ts: float
++
++
++class _Accumulator:
++    """Mutable per-scope spend state; never exposed directly to callers."""
++
++    __slots__ = ("limit", "spent", "warned", "exceeded", "day_key")
++
++    def __init__(self, limit: BudgetLimit) -> None:
++        self.limit = limit
++        self.spent = 0.0
++        self.warned = False
++        self.exceeded = False
++        self.day_key: Optional[tuple[int, int, int]] = None
++
++
++def _clamp_ratio(value: float) -> float:
++    """Clamp a ratio to ``[0, +inf)``; NaN/non-numeric → 0.0."""
++    if not isinstance(value, (int, float)) or not math.isfinite(value):
++        return 0.0
++    return float(value) if value > 0.0 else 0.0
++
++
++def _coerce_cost(value: Any) -> float:
++    """Coerce a per-turn cost to a non-negative finite float; bad input → 0.0."""
++    try:
++        cost = float(value)
++    except (TypeError, ValueError):
++        return 0.0
++    if not math.isfinite(cost) or cost < 0.0:
++        return 0.0
++    return cost
++
++
++class SpendBudgetTracker:
++    """Accumulate per-scope spend and emit one-shot threshold events."""
++
++    def __init__(self, limits: list[BudgetLimit], *, clock: Callable[[], float] | None = None) -> None:
++        self._clock: Callable[[], float] = clock or time.time
++        self._accs: dict[str, _Accumulator] = {}
++        for limit in limits or ():
++            if limit is None:
++                continue
++            if limit.scope not in SCOPES:
++                continue
++            if not isinstance(limit.limit_usd, (int, float)):
++                continue
++            if not math.isfinite(limit.limit_usd) or limit.limit_usd <= 0:
++                continue
++            self._accs[limit.scope] = _Accumulator(limit)
++        # Seed the daily day-key so the first record never spuriously resets.
++        daily = self._accs.get("daily")
++        if daily is not None:
++            daily.day_key = self._day_key()
++
++    # ── internal ────────────────────────────────────────
++    def _day_key(self) -> tuple[int, int, int]:
++        lt = time.localtime(self._clock())
++        return (lt.tm_year, lt.tm_mon, lt.tm_mday)
++
++    def _ratio(self, acc: _Accumulator) -> float:
++        limit = acc.limit.limit_usd
++        if limit <= 0:
++            return 0.0
++        return _clamp_ratio(acc.spent / limit)
++
++    def _status(self, acc: _Accumulator) -> BudgetStatus:
++        limit = acc.limit.limit_usd
++        remaining = limit - acc.spent
++        if remaining < 0.0:
++            remaining = 0.0
++        return BudgetStatus(
++            scope=acc.limit.scope,
++            spent_usd=acc.spent,
++            limit_usd=limit,
++            ratio=self._ratio(acc),
++            remaining_usd=remaining,
++            warned=acc.warned,
++            exceeded=acc.exceeded,
++        )
++
++    def _maybe_daily_reset(self, acc: _Accumulator) -> list[BudgetEvent]:
++        current = self._day_key()
++        if acc.day_key is None:
++            acc.day_key = current
++            return []
++        if current == acc.day_key:
++            return []
++        acc.spent = 0.0
++        acc.warned = False
++        acc.exceeded = False
++        acc.day_key = current
++        return [BudgetEvent("reset", acc.limit.scope, 0.0, acc.limit.limit_usd, 0.0, self._clock())]
++
++    # ── public API ─────────────────────────────────────
++    def record_usage(self, *, scope: str, cost_usd: float, session_id: str | None = None) -> list[BudgetEvent]:
++        acc = self._accs.get(scope)
++        if acc is None:
++            return []
++        events: list[BudgetEvent] = []
++        if scope == "daily":
++            events.extend(self._maybe_daily_reset(acc))
++        acc.spent += _coerce_cost(cost_usd)
++        ratio = self._ratio(acc)
++        limit = acc.limit.limit_usd
++        warn_at = limit * acc.limit.warn_ratio
++        if acc.spent >= warn_at and not acc.warned:
++            acc.warned = True
++            events.append(BudgetEvent("warn", scope, acc.spent, limit, ratio, self._clock()))
++        if acc.spent >= limit and not acc.exceeded:
++            acc.exceeded = True
++            acc.warned = True
++            events.append(BudgetEvent("exceeded", scope, acc.spent, limit, ratio, self._clock()))
++        return events
++
++    def snapshot(self) -> dict[str, BudgetStatus]:
++        return {scope: self._status(acc) for scope, acc in self._accs.items()}
++
++    def remaining(self, scope: str) -> float | None:
++        acc = self._accs.get(scope)
++        if acc is None:
++            return None
++        remaining = acc.limit.limit_usd - acc.spent
++        return remaining if remaining > 0.0 else 0.0
++
++    def is_exceeded(self, scope: str) -> bool:
++        acc = self._accs.get(scope)
++        return bool(acc.exceeded) if acc is not None else False
++
++    def reset(self, scope: str) -> None:
++        acc = self._accs.get(scope)
++        if acc is None:
++            return
++        acc.spent = 0.0
++        acc.warned = False
++        acc.exceeded = False
++        if scope == "daily":
++            acc.day_key = self._day_key()
++
++
++# ── config parsing ──────────────────────────────────────
++
++
++def _as_bool(value: Any, default: bool = False) -> bool:
++    if isinstance(value, bool):
++        return value
++    if value is None:
++        return default
++    if isinstance(value, (int, float)):
++        return value != 0
++    if isinstance(value, str):
++        return value.strip().lower() in ("1", "true", "yes", "on")
++    return default
++
++
++def _coerce_ratio(value: Any, default: float = 0.8) -> float | None:
++    if value is None:
++        return default
++    try:
++        ratio = float(value)
++    except (TypeError, ValueError):
++        logger.warning("spend_budget ▸ invalid warn ratio: %r", value)
++        return None
++    if not math.isfinite(ratio) or ratio <= 0.0:
++        logger.warning("spend_budget ▸ invalid warn ratio: %r", value)
++        return None
++    return 1.0 if ratio > 1.0 else ratio
++
++
++def _coerce_limit(scope: str, value: Any) -> float | None:
++    if value is None:
++        return None
++    try:
++        limit = float(value)
++    except (TypeError, ValueError):
++        logger.warning("spend_budget ▸ ignoring non-numeric %s limit: %r", scope, value)
++        return None
++    if not math.isfinite(limit) or limit <= 0.0:
++        logger.warning("spend_budget ▸ ignoring non-positive %s limit: %r", scope, value)
++        return None
++    return limit
++
++
++def parse_budget_config(raw: dict[str, Any] | None) -> list[BudgetLimit]:
++    """Parse the ``budget.*`` mapping into a list of BudgetLimit.
++
++    Returns ``[]`` (disabled) when the mapping is absent, ``enabled`` is falsey,
++    or no scope has a valid positive limit. Malformed/negative limits are
++    skipped with a logged warning; the function never raises.
++    """
++    if not isinstance(raw, dict):
++        return []
++    try:
++        if "budget" in raw:
++            section = raw.get("budget")
++            if not isinstance(section, Mapping):
++                logger.warning("spend_budget ▸ malformed budget section, disabling")
++                return []
++            raw = dict(section)
++        if not _as_bool(raw.get("enabled"), False):
++            return []
++        warn_ratio = _coerce_ratio(raw.get("warn_ratio"), 0.8)
++        if warn_ratio is None:
++            return []
++        limits: list[BudgetLimit] = []
++        for scope, key in (
++            ("session", "session_limit_usd"),
++            ("daily", "daily_limit_usd"),
++            ("total", "total_limit_usd"),
++        ):
++            limit = _coerce_limit(scope, raw.get(key))
++            if limit is None:
++                continue
++            limits.append(BudgetLimit(scope=scope, limit_usd=limit, warn_ratio=warn_ratio))
++        return limits
++    except Exception:
++        logger.warning("spend_budget ▸ malformed budget config, disabling", exc_info=True)
++        return []
++
++
++# ── formatting ──────────────────────────────────────────
++
++
++def _fmt_usd(value: float) -> str:
++    try:
++        amount = float(value)
++    except (TypeError, ValueError):
++        amount = 0.0
++    if not math.isfinite(amount):
++        amount = 0.0
++    return f"${amount:.2f}"
++
++
++def format_budget_status(status: BudgetStatus, *, use_color: bool = True) -> str:
++    """Render a compact, locale-independent one-line budget status string."""
++    spent = _fmt_usd(status.spent_usd)
++    limit = _fmt_usd(status.limit_usd)
++    pct = int(round(_clamp_ratio(status.ratio) * 100))
++    if status.exceeded:
++        core = f"budget[{status.scope}] {spent}/{limit} ({pct}%) EXCEEDED"
++    else:
++        remaining = _fmt_usd(status.remaining_usd)
++        core = f"budget[{status.scope}] {spent}/{limit} ({pct}%) · {remaining} left"
++    if not use_color:
++        return core
++    if status.exceeded:
++        return f"\033[31m{core}\033[0m"
++    if status.warned:
++        return f"\033[33m{core}\033[0m"
++    return core
+diff --git a/agent/usage_pricing.py b/agent/usage_pricing.py
+index 04d34d1..2ca6d98 100644
+--- a/agent/usage_pricing.py
++++ b/agent/usage_pricing.py
+@@ -100,6 +100,77 @@ class CostResult:
+ _UTC_NOW = lambda: datetime.now(timezone.utc)
+ 
+ 
++def _usage_tokens(usage: Any, *keys: str) -> int:
++    """Read a token count from a usage dict or object; missing/bad → 0."""
++    for key in keys:
++        value = usage.get(key) if isinstance(usage, dict) else getattr(usage, key, None)
++        if value is not None:
++            try:
++                return int(value)
++            except (TypeError, ValueError):
++                return 0
++    return 0
++
++
++def _price_per_token(pricing: Any, *keys: str) -> float:
++    """Read a per-token USD price from a pricing mapping/object.
++
++    Keys containing ``million`` are divided by 1e6; bare ``input``/``output``
++    keys are treated as already per-token (matching ``DEFAULT_PRICING``).
++    Missing/unparseable → 0.0.
++    """
++    for key in keys:
++        value = pricing.get(key) if isinstance(pricing, dict) else getattr(pricing, key, None)
++        if value is None:
++            continue
++        try:
++            rate = float(value)
++        except (TypeError, ValueError):
++            return 0.0
++        if "million" in key:
++            rate = rate / 1_000_000.0
++        return rate
++    return 0.0
++
++
++def turn_cost_usd(usage: dict[str, Any] | Any, pricing: dict[str, Any] | Any) -> float:
++    """Additive: compute one turn's USD cost from a usage + pricing record.
++
++    Backward-compatible helper used by the spend-budget subsystem. Reads input
++    and output token counts and multiplies by per-token USD prices. Returns
++    ``0.0`` when pricing is unknown/missing or on any parse error — never
++    raises, and never touches the existing pricing functions.
++    """
++    if usage is None or pricing is None:
++        return 0.0
++    try:
++        in_tokens = _usage_tokens(usage, "input_tokens", "prompt_tokens")
++        out_tokens = _usage_tokens(usage, "output_tokens", "completion_tokens")
++        cache_read_tokens = _usage_tokens(usage, "cache_read_tokens", "cached_tokens")
++        cache_write_tokens = _usage_tokens(usage, "cache_write_tokens")
++        request_count = _usage_tokens(usage, "request_count")
++        in_rate = _price_per_token(pricing, "input_cost_per_million", "input")
++        out_rate = _price_per_token(pricing, "output_cost_per_million", "output")
++        cache_read_rate = _price_per_token(pricing, "cache_read_cost_per_million")
++        cache_write_rate = _price_per_token(pricing, "cache_write_cost_per_million")
++        request_rate = _price_per_token(pricing, "request_cost")
++    except Exception:
++        return 0.0
++    cost = (
++        in_tokens * in_rate
++        + out_tokens * out_rate
++        + cache_read_tokens * cache_read_rate
++        + cache_write_tokens * cache_write_rate
++        + request_count * request_rate
++    )
++    # Guard NaN/inf without importing math into this module's namespace.
++    if cost != cost or cost in (float("inf"), float("-inf")):
++        return 0.0
++    if cost < 0.0:
++        return 0.0
++    return float(cost)
++
++
+ # Official docs snapshot entries. Models whose published pricing and cache
+ # semantics are stable enough to encode exactly.
+ _OFFICIAL_DOCS_PRICING: Dict[tuple[str, str], PricingEntry] = {
+diff --git a/gateway/runtime_footer.py b/gateway/runtime_footer.py
+index 8719524..4b0acc9 100644
+--- a/gateway/runtime_footer.py
++++ b/gateway/runtime_footer.py
+@@ -169,13 +169,31 @@ def build_footer_line(
+     it ``None`` and the ``latency`` field is skipped.
+     """
+     cfg = resolve_footer_config(user_config, platform_key)
+-    if not cfg.get("enabled"):
+-        return ""
+-    return format_runtime_footer(
+-        model=model,
+-        context_tokens=context_tokens,
+-        context_length=context_length,
+-        cwd=cwd,
+-        turn_seconds=turn_seconds,
+-        fields=cfg.get("fields") or _DEFAULT_FIELDS,
+-    )
++    parts: list[str] = []
++    if cfg.get("enabled"):
++        runtime = format_runtime_footer(
++            model=model,
++            context_tokens=context_tokens,
++            context_length=context_length,
++            cwd=cwd,
++            turn_seconds=turn_seconds,
++            fields=cfg.get("fields") or _DEFAULT_FIELDS,
++        )
++        if runtime:
++            parts.append(runtime)
++
++    budget_config = (user_config or {}).get("budget") or {}
++    if isinstance(budget_config, dict) and bool(budget_config.get("enabled")):
++        try:
++            from agent.credits_tracker import get_budget_tracker
++            from agent.spend_budget import format_budget_status
++
++            tracker = get_budget_tracker(user_config)
++            snapshot = tracker.snapshot() if tracker is not None else {}
++            for scope in ("session", "daily", "total"):
++                status = snapshot.get(scope)
++                if status is not None:
++                    parts.append(format_budget_status(status, use_color=False))
++        except Exception:
++            pass
++    return _SEP.join(parts)
+diff --git a/hermes_cli/cli_billing_mixin.py b/hermes_cli/cli_billing_mixin.py
+index b0ec388..88e91d4 100644
+--- a/hermes_cli/cli_billing_mixin.py
++++ b/hermes_cli/cli_billing_mixin.py
+@@ -20,6 +20,24 @@ from __future__ import annotations
+ class CLIBillingMixin:
+     """Mixin holding interactive-CLI billing and subscription handlers."""
+ 
++    def _print_spend_budget_block(self) -> bool:
++        """Print the current configured spend-budget snapshot."""
++        try:
++            from agent.billing_view import build_budget_lines
++            from agent.credits_tracker import get_budget_tracker
++            from hermes_cli.config import load_config
++
++            lines = build_budget_lines(get_budget_tracker(load_config()), use_color=False)
++        except Exception:
++            return False
++        if not lines:
++            return False
++        print()
++        print("  Spend budgets")
++        for line in lines:
++            print(f"  {line}")
++        return True
++
+     def _print_nous_credits_block(self) -> bool:
+         """Print the Nous dollar balance block (two-bar view) when a Nous account
+         is logged in. Returns True if it printed anything.
+@@ -72,6 +90,7 @@ class CLIBillingMixin:
+                 printed_any = True
+ 
+             if printed_any:
++                self._print_spend_budget_block()
+                 return True
+ 
+         # Fallback: legacy text lines (only when the model is unavailable).
+@@ -79,10 +98,11 @@ class CLIBillingMixin:
+ 
+         lines = nous_credits_lines()
+         if not lines:
+-            return False
++            return self._print_spend_budget_block()
+         print()
+         for line in lines:
+             print(f"  {line}")
++        self._print_spend_budget_block()
+         return True
+ 
+     def _print_usage_cta(self) -> None:
+diff --git a/hermes_cli/config_defaults.py b/hermes_cli/config_defaults.py
+index 59f177b..d2d5c83 100644
+--- a/hermes_cli/config_defaults.py
++++ b/hermes_cli/config_defaults.py
+@@ -10,6 +10,14 @@ DEFAULT_CONFIG = {
+     "fallback_providers": [],
+     "credential_pool_strategies": {},
+     "toolsets": ["hermes-cli"],
++    "budget": {
++        "enabled": False,
++        "session_limit_usd": None,
++        "daily_limit_usd": None,
++        "total_limit_usd": None,
++        "warn_ratio": 0.8,
++        "enforce": False,
++    },
+     # SQLite journal mode used by every Hermes database opener. WAL is the
+     # normal default; set DELETE for weak-fsync/shared filesystems where WAL is
+     # not crash-safe (for example macOS virtiofs, NFS, or SMB).
+diff --git a/run_agent.py b/run_agent.py
+index 5992d54..3112ba0 100644
+--- a/run_agent.py
++++ b/run_agent.py
+@@ -8091,12 +8091,15 @@ def main(
+     list_tools: bool = False,
+     save_trajectories: bool = False,
+     save_sample: bool = False,
++    budget_limit: float = None,
+     verbose: bool = False,
+     log_prefix_chars: int = 20
+ ):
+     """
+     Main function for running the agent directly.
+ 
++    Command option: ``--budget-limit <USD>`` sets a session budget for this invocation.
++
+     Args:
+         query (str): Natural language query for the agent. Defaults to Python 3.13 example.
+         model (str): Model name to use (OpenRouter format: provider/model). Defaults to anthropic/claude-sonnet-4.6.
+@@ -8110,6 +8113,7 @@ def main(
+         list_tools (bool): Just list available tools and exit
+         save_trajectories (bool): Save conversation trajectories to JSONL files (appends to trajectory_samples.jsonl). Defaults to False.
+         save_sample (bool): Save a single trajectory sample to a UUID-named JSONL file for inspection. Defaults to False.
++        budget_limit (float): Session-scope budget limit in USD for this invocation.
+         verbose (bool): Enable verbose logging for debugging. Defaults to False.
+         log_prefix_chars (int): Number of characters to show in log previews for tool calls/responses. Defaults to 20.
+ 
+@@ -8232,6 +8236,15 @@ def main(
+             verbose_logging=verbose,
+             log_prefix_chars=log_prefix_chars
+         )
++        if budget_limit is not None:
++            from agent.spend_budget import BudgetLimit, SpendBudgetTracker
++
++            limit_usd = float(budget_limit)
++            if limit_usd <= 0:
++                raise RuntimeError("--budget-limit must be a positive USD amount")
++            agent.spend_budget_tracker = SpendBudgetTracker([
++                BudgetLimit(scope="session", limit_usd=limit_usd)
++            ])
+     except RuntimeError as e:
+         print(f"❌ Failed to initialize agent: {e}")
+         return
+diff --git a/tests/agent/test_spend_budget.py b/tests/agent/test_spend_budget.py
+new file mode 100644
+index 0000000..93c4a65
+--- /dev/null
++++ b/tests/agent/test_spend_budget.py
+@@ -0,0 +1,151 @@
++"""Tests for the deterministic spend-budget subsystem (agent/spend_budget.py).
++
++Covers the tracker (accumulation, one-shot warn/exceeded, daily reset with an
++injected clock, snapshot/remaining/is_exceeded), config parsing, formatting,
++the additive ``turn_cost_usd`` pricing helper, and the ``budget.threshold``
++telemetry payload shape.
++"""
++
++from __future__ import annotations
++
++from agent.spend_budget import (
++    BudgetEvent,
++    BudgetLimit,
++    BudgetStatus,
++    SpendBudgetTracker,
++    format_budget_status,
++    parse_budget_config,
++)
++
++
++def _tracker(**limits):
++    clock = limits.pop("clock", None)
++    lims = [BudgetLimit(scope=scope, limit_usd=val, warn_ratio=0.8) for scope, val in limits.items()]
++    return SpendBudgetTracker(lims, clock=clock)
++
++
++def test_warn_fires_once():
++    t = _tracker(session=10.0)
++    assert t.record_usage(scope="session", cost_usd=7.0) == []
++    events = t.record_usage(scope="session", cost_usd=1.5)  # 8.5 >= 8.0 warn
++    assert [e.kind for e in events] == ["warn"]
++    more = t.record_usage(scope="session", cost_usd=0.5)
++    assert [e.kind for e in more] == []
++
++
++def test_exceeded_fires_once():
++    t = _tracker(session=10.0)
++    t.record_usage(scope="session", cost_usd=8.0)  # warn
++    events = t.record_usage(scope="session", cost_usd=2.0)  # exceeded
++    assert [e.kind for e in events] == ["exceeded"]
++    assert t.is_exceeded("session") is True
++    assert t.record_usage(scope="session", cost_usd=5.0) == []
++
++
++def test_direct_jump_emits_warn_then_exceeded():
++    t = _tracker(session=10.0)
++    events = t.record_usage(scope="session", cost_usd=25.0)
++    assert [e.kind for e in events] == ["warn", "exceeded"]
++
++
++def test_remaining_and_snapshot():
++    t = _tracker(total=20.0)
++    t.record_usage(scope="total", cost_usd=5.0)
++    assert abs(t.remaining("total") - 15.0) < 1e-9
++    assert t.remaining("session") is None
++    snap = t.snapshot()
++    assert set(snap) == {"total"}
++    assert isinstance(snap["total"], BudgetStatus)
++    assert abs(snap["total"].ratio - 0.25) < 1e-9
++
++
++def test_daily_reset_on_midnight():
++    day = [1_000_000.0]  # arbitrary fixed epoch
++    t = SpendBudgetTracker([BudgetLimit(scope="daily", limit_usd=10.0)], clock=lambda: day[0])
++    t.record_usage(scope="daily", cost_usd=6.0)
++    assert abs(t.remaining("daily") - 4.0) < 1e-9
++    day[0] += 60 * 60 * 48  # > 1 day → crosses local midnight
++    events = t.record_usage(scope="daily", cost_usd=1.0)
++    assert "reset" in [e.kind for e in events]
++    assert abs(t.remaining("daily") - 9.0) < 1e-9
++
++
++def test_session_and_total_never_autoreset():
++    day = [1_000_000.0]
++    t = SpendBudgetTracker(
++        [BudgetLimit(scope="session", limit_usd=10.0), BudgetLimit(scope="total", limit_usd=10.0)],
++        clock=lambda: day[0],
++    )
++    t.record_usage(scope="session", cost_usd=3.0)
++    t.record_usage(scope="total", cost_usd=3.0)
++    day[0] += 60 * 60 * 72
++    t.record_usage(scope="session", cost_usd=1.0)
++    t.record_usage(scope="total", cost_usd=1.0)
++    assert abs(t.remaining("session") - 6.0) < 1e-9
++    assert abs(t.remaining("total") - 6.0) < 1e-9
++
++
++def test_parse_config_disabled_and_malformed():
++    assert parse_budget_config(None) == []
++    assert parse_budget_config({}) == []
++    assert parse_budget_config({"enabled": False, "session_limit_usd": 5.0}) == []
++    limits = parse_budget_config(
++        {
++            "enabled": True,
++            "session_limit_usd": 5.0,
++            "daily_limit_usd": -1.0,
++            "total_limit_usd": "not-a-number",
++            "warn_ratio": 0.5,
++        }
++    )
++    assert [lim.scope for lim in limits] == ["session"]
++    assert limits[0].warn_ratio == 0.5
++
++
++def test_parse_config_warn_ratio_clamped():
++    over = parse_budget_config({"enabled": True, "session_limit_usd": 5.0, "warn_ratio": 5.0})
++    assert over[0].warn_ratio == 1.0
++    under = parse_budget_config({"enabled": True, "session_limit_usd": 5.0, "warn_ratio": -1.0})
++    assert under == []
++
++
++def test_format_status_locale_independent():
++    status = BudgetStatus(
++        scope="session", spent_usd=1.5, limit_usd=5.0, ratio=0.3,
++        remaining_usd=3.5, warned=False, exceeded=False,
++    )
++    line = format_budget_status(status, use_color=False)
++    assert "budget[session]" in line
++    assert "$1.50/$5.00" in line
++    assert "left" in line
++
++
++def test_format_status_exceeded_color():
++    status = BudgetStatus(
++        scope="total", spent_usd=12.0, limit_usd=10.0, ratio=1.2,
++        remaining_usd=0.0, warned=True, exceeded=True,
++    )
++    assert "EXCEEDED" in format_budget_status(status, use_color=False)
++    assert format_budget_status(status, use_color=True).startswith("\033[31m")
++
++
++def test_turn_cost_usd_additive():
++    from agent.usage_pricing import turn_cost_usd
++    usage = {"input_tokens": 1_000_000, "output_tokens": 1_000_000}
++    pricing = {"input_cost_per_million": 5.0, "output_cost_per_million": 25.0}
++    assert abs(turn_cost_usd(usage, pricing) - 30.0) < 1e-9
++    assert turn_cost_usd(usage, None) == 0.0
++    assert turn_cost_usd(usage, {}) == 0.0
++
++
++def test_budget_threshold_payload_shape():
++    from agent.monitoring.events import BUDGET_THRESHOLD_EVENT, budget_threshold_payload
++    assert BUDGET_THRESHOLD_EVENT == "budget.threshold"
++    ev = BudgetEvent(kind="warn", scope="session", spent_usd=8.0, limit_usd=10.0, ratio=0.8, ts=123.0)
++    payload = budget_threshold_payload(ev, session_id="sess-1")
++    assert set(payload) == {"scope", "kind", "spent_usd", "limit_usd", "ratio", "session_id", "ts"}
++    assert payload["spent_usd"] == 8.0
++    assert payload["session_id"] == "sess-1"
++    # No secret-bearing keys leak into the telemetry payload.
++    for banned in ("api_key", "apikey", "token", "account", "credential", "secret"):
++        assert banned not in payload

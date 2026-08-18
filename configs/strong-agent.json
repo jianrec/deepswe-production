@@ -1,0 +1,20 @@
+{
+  "pipeline_version": "2.0",
+  "provider": "packy-anthropic-messages",
+  "model": "claude-opus-4-8",
+  "responsibilities": [
+    "repository understanding",
+    "issue design",
+    "public API contract",
+    "PR chain",
+    "reference implementation",
+    "hidden-test gap review"
+  ],
+  "forbidden_responsibilities": [
+    "hidden-test implementation",
+    "RL rollout generation"
+  ],
+  "hidden_test_provider": "packy-responses",
+  "hidden_test_model": "gpt-5.6-sol",
+  "anthropic_http_scripts_enabled": true
+}

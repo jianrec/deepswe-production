@@ -1,0 +1,528 @@
+diff --git a/hidden-tests/alphabetCodec.feature.test.js b/hidden-tests/alphabetCodec.feature.test.js
+new file mode 100644
+index 0000000..7dec063
+--- /dev/null
++++ b/hidden-tests/alphabetCodec.feature.test.js
+@@ -0,0 +1,48 @@
++import AlphabetCodec from '../src/algorithms/cryptography/alphabet/AlphabetCodec';
++
++test('AlphabetCodec rejects an empty alphabet', () => {
++  expect(() => new AlphabetCodec('')).toThrow(Error);
++});
++
++test('AlphabetCodec rejects duplicate symbols', () => {
++  expect(() => new AlphabetCodec('ABCA')).toThrow(Error);
++});
++
++test('AlphabetCodec encodes symbols as zero-based indices', () => {
++  const codec = new AlphabetCodec('WXYZ');
++  expect(codec.encode('ZWWY')).toEqual([3, 0, 0, 2]);
++});
++
++test('AlphabetCodec decodes indices using configured symbol case', () => {
++  const codec = new AlphabetCodec('aBcD');
++  expect(codec.decode([0, 1, 2, 3])).toBe('aBcD');
++});
++
++test('AlphabetCodec indexOf returns configured positions', () => {
++  const codec = new AlphabetCodec('QWER');
++  expect(codec.indexOf('Q')).toBe(0);
++  expect(codec.indexOf('E')).toBe(2);
++});
++
++test('AlphabetCodec symbolAt normalizes negative indices', () => {
++  const codec = new AlphabetCodec('ABCD');
++  expect(codec.symbolAt(-1)).toBe('D');
++});
++
++test('AlphabetCodec symbolAt normalizes indices beyond the alphabet', () => {
++  const codec = new AlphabetCodec('ABCD');
++  expect(codec.symbolAt(10)).toBe('C');
++});
++
++test('AlphabetCodec rejects unknown symbols by default', () => {
++  const codec = new AlphabetCodec('ABC');
++  expect(() => codec.encode('AB!C')).toThrow(Error);
++});
++
++test('AlphabetCodec decode does not mutate index arrays', () => {
++  const codec = new AlphabetCodec('ABC');
++  const indices = [2, 0, 1];
++  const snapshot = indices.slice();
++  expect(codec.decode(indices)).toBe('CAB');
++  expect(indices).toEqual(snapshot);
++});
+diff --git a/hidden-tests/caesarNormalizedShift.feature.test.js b/hidden-tests/caesarNormalizedShift.feature.test.js
+new file mode 100644
+index 0000000..3881657
+--- /dev/null
++++ b/hidden-tests/caesarNormalizedShift.feature.test.js
+@@ -0,0 +1,28 @@
++import {
++  caesarCipherEncrypt,
++  caesarCipherDecrypt,
++} from '../src/algorithms/cryptography/caesar-cipher/caesarCipher';
++
++test('Caesar normalizes very large positive shifts', () => {
++  expect(caesarCipherEncrypt('xyz', (26 * 1000000) + 1)).toBe('yza');
++});
++
++test('Caesar normalizes very large negative shifts', () => {
++  expect(caesarCipherEncrypt('abc', (-26 * 1000000) - 1)).toBe('zab');
++});
++
++test('Caesar decrypt normalizes large signed shifts', () => {
++  const shift = (-26 * 123456) - 5;
++  const encrypted = caesarCipherEncrypt('Attack at dawn!', shift);
++  expect(caesarCipherDecrypt(encrypted, shift)).toBe('attack at dawn!');
++});
++
++test('Caesar keeps default lowercase and unknown-character pass-through behavior', () => {
++  expect(caesarCipherEncrypt('AZ 19!', 1)).toBe('ba 19!');
++});
++
++test('Caesar supports an existing custom alphabet argument', () => {
++  const alphabet = ['0', '1', '2', '3'];
++  expect(caesarCipherEncrypt('301-x', 5, alphabet)).toBe('012-x');
++  expect(caesarCipherDecrypt('012-x', 5, alphabet)).toBe('301-x');
++});
+diff --git a/hidden-tests/hillCipherRoundTrip.feature.test.js b/hidden-tests/hillCipherRoundTrip.feature.test.js
+new file mode 100644
+index 0000000..a027efb
+--- /dev/null
++++ b/hidden-tests/hillCipherRoundTrip.feature.test.js
+@@ -0,0 +1,81 @@
++import {
++  hillCipherEncrypt,
++  hillCipherDecrypt,
++} from '../src/algorithms/cryptography/hill-cipher/hillCipher';
++
++const key = 'GYBNQKURP';
++
++test('Hill encryption preserves the classic uppercase one-block result', () => {
++  expect(hillCipherEncrypt('ACT', key)).toBe('POH');
++});
++
++test('Hill decryption supports the classic uppercase one-block result', () => {
++  expect(hillCipherDecrypt('POH', key)).toBe('ACT');
++});
++
++test('Hill encryption processes multiple complete blocks', () => {
++  expect(hillCipherEncrypt('ACTACT', key)).toBe('POHPOH');
++});
++
++test('Hill decryption processes multiple complete blocks', () => {
++  expect(hillCipherDecrypt('POHPOH', key)).toBe('ACTACT');
++});
++
++test('Hill round trips a multi-block default alphabet message', () => {
++  const message = 'SECRETMESSAGE';
++  const options = { padding: true, stripPadding: true };
++  const encrypted = hillCipherEncrypt(message, key, options);
++  expect(hillCipherDecrypt(encrypted, key, options)).toBe(message);
++});
++
++test('Hill encryption pads a partial block with the alphabet first symbol', () => {
++  const encrypted = hillCipherEncrypt('ACTA', key, { padding: true });
++  expect(encrypted).toHaveLength(6);
++  expect(hillCipherDecrypt(encrypted, key)).toBe('ACTAAA');
++});
++
++test('Hill supports caller-selected deterministic padding', () => {
++  const options = { padding: 'X', stripPadding: 'X' };
++  const encrypted = hillCipherEncrypt('ACTA', key, options);
++  expect(hillCipherDecrypt(encrypted, key, options)).toBe('ACTA');
++});
++
++test('Hill decryption does not silently strip legitimate trailing symbols', () => {
++  const encrypted = hillCipherEncrypt('DATAAA', key);
++  expect(hillCipherDecrypt(encrypted, key)).toBe('DATAAA');
++});
++
++test('Hill supports custom alphabets and multiple blocks', () => {
++  const options = { alphabet: 'ABCDE' };
++  const customKey = 'BCDA';
++  const message = 'ABCDEA';
++  const encrypted = hillCipherEncrypt(message, customKey, options);
++  expect(hillCipherDecrypt(encrypted, customKey, options)).toBe(message);
++});
++
++test('Hill preserves the configured alphabet symbol case', () => {
++  const options = { alphabet: 'abcde' };
++  const customKey = 'bcda';
++  const encrypted = hillCipherEncrypt('abcdea', customKey, options);
++  expect(hillCipherDecrypt(encrypted, customKey, options)).toBe('abcdea');
++});
++
++test('Hill rejects key lengths that are not perfect squares', () => {
++  expect(() => hillCipherEncrypt('ACT', 'ABCDE')).toThrow(Error);
++  expect(() => hillCipherDecrypt('ACT', 'ABCDE')).toThrow(Error);
++});
++
++test('Hill rejects message and key symbols outside the alphabet', () => {
++  expect(() => hillCipherEncrypt('AC!', key)).toThrow(Error);
++  expect(() => hillCipherEncrypt('ACT', 'GYBNQKUR!')).toThrow(Error);
++  expect(() => hillCipherDecrypt('PO!', key)).toThrow(Error);
++});
++
++test('Hill rejects non-invertible key matrices in both directions', () => {
++  expect(() => hillCipherEncrypt('AB', 'AAAA')).toThrow(Error);
++  expect(() => hillCipherDecrypt('AB', 'AAAA')).toThrow(Error);
++});
++
++test('Hill rejects ciphertext whose length is not block aligned', () => {
++  expect(() => hillCipherDecrypt('POHA', key)).toThrow(Error);
++});
+diff --git a/hidden-tests/leastCommonMultipleSigned.feature.test.js b/hidden-tests/leastCommonMultipleSigned.feature.test.js
+new file mode 100644
+index 0000000..9baa898
+--- /dev/null
++++ b/hidden-tests/leastCommonMultipleSigned.feature.test.js
+@@ -0,0 +1,15 @@
++import leastCommonMultiple from '../src/algorithms/math/least-common-multiple/leastCommonMultiple';
++
++test('leastCommonMultiple returns zero when either signed integer is zero', () => {
++  expect(leastCommonMultiple(0, -15)).toBe(0);
++  expect(leastCommonMultiple(-15, 0)).toBe(0);
++});
++
++test('leastCommonMultiple normalizes one negative input', () => {
++  expect(leastCommonMultiple(-21, 6)).toBe(42);
++  expect(leastCommonMultiple(21, -6)).toBe(42);
++});
++
++test('leastCommonMultiple normalizes two negative inputs', () => {
++  expect(leastCommonMultiple(-8, -12)).toBe(24);
++});
+diff --git a/hidden-tests/matrixClassicalCipher.feature.test.js b/hidden-tests/matrixClassicalCipher.feature.test.js
+new file mode 100644
+index 0000000..9113fd6
+--- /dev/null
++++ b/hidden-tests/matrixClassicalCipher.feature.test.js
+@@ -0,0 +1,74 @@
++import {
++  dot,
++  minor,
++  determinant,
++  adjugate,
++  inverseMod,
++} from '../src/algorithms/math/matrix/Matrix';
++import { mod } from '../src/algorithms/math/modular-arithmetic/modularArithmetic';
++
++test('matrix minor removes the requested row and column', () => {
++  expect(minor([[3, 2, 1], [0, 4, 5], [1, 6, 4]], 0, 1))
++    .toEqual([[0, 5], [1, 4]]);
++});
++
++test('matrix determinant supports one by one matrices', () => {
++  expect(determinant([[7]])).toBe(7);
++});
++
++test('matrix determinant supports two by two matrices', () => {
++  expect(determinant([[1, 2], [3, 4]])).toBe(-2);
++});
++
++test('matrix determinant supports three by three matrices', () => {
++  expect(determinant([[6, 1, 1], [4, -2, 5], [2, 8, 7]])).toBe(-306);
++});
++
++test('matrix adjugate supports one by one matrices', () => {
++  expect(adjugate([[12]])).toEqual([[1]]);
++});
++
++test('matrix adjugate transposes signed cofactors', () => {
++  expect(adjugate([[4, 7], [2, 6]])).toEqual([[6, -7], [-2, 4]]);
++});
++
++test('matrix inverseMod returns a normalized two by two inverse', () => {
++  expect(inverseMod([[3, 3], [2, 5]], 26)).toEqual([[15, 17], [20, 9]]);
++});
++
++test('matrix inverseMod supports a three by three Hill key', () => {
++  expect(inverseMod([[6, 24, 1], [13, 16, 10], [20, 17, 15]], 26))
++    .toEqual([[8, 5, 10], [21, 8, 21], [21, 12, 8]]);
++});
++
++test('matrix inverseMod produces a modular identity for a four by four matrix', () => {
++  const source = [[1, 2, 0, 0], [0, 1, 3, 0], [0, 0, 1, 4], [0, 0, 0, 1]];
++  const inverse = inverseMod(source, 29);
++  const product = dot(source, inverse).map((row) => row.map((cell) => mod(cell, 29)));
++  expect(product).toEqual([[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]);
++});
++
++test('matrix inverseMod does not mutate its source matrix', () => {
++  const source = [[3, 3], [2, 5]];
++  const snapshot = source.map((row) => row.slice());
++  inverseMod(source, 26);
++  expect(source).toEqual(snapshot);
++});
++
++test('matrix operations reject ragged matrices', () => {
++  expect(() => determinant([[1, 2], [3]])).toThrow(Error);
++  expect(() => inverseMod([[1, 2], [3]], 5)).toThrow(Error);
++});
++
++test('matrix operations reject non-square matrices', () => {
++  expect(() => determinant([[1, 2, 3], [4, 5, 6]])).toThrow(Error);
++  expect(() => inverseMod([[1, 2, 3], [4, 5, 6]], 7)).toThrow(Error);
++});
++
++test('matrix inverseMod rejects non-integer cells', () => {
++  expect(() => inverseMod([[1, 0.5], [0, 1]], 7)).toThrow(Error);
++});
++
++test('matrix inverseMod rejects a determinant not coprime with modulus', () => {
++  expect(() => inverseMod([[2, 0], [0, 2]], 26)).toThrow(Error);
++});
+diff --git a/hidden-tests/modularArithmetic.feature.test.js b/hidden-tests/modularArithmetic.feature.test.js
+new file mode 100644
+index 0000000..ebc0b53
+--- /dev/null
++++ b/hidden-tests/modularArithmetic.feature.test.js
+@@ -0,0 +1,117 @@
++import {
++  mod,
++  extendedEuclidean,
++  modularInverse,
++} from '../src/algorithms/math/modular-arithmetic/modularArithmetic';
++
++test('mod normalizes negative dividends', () => {
++  expect(mod(-27, 5)).toBe(3);
++});
++
++test('mod accepts a negative modulus by magnitude', () => {
++  expect(mod(-27, -5)).toBe(3);
++});
++
++test('mod normalizes arbitrarily large safe operands', () => {
++  expect(mod(Number.MAX_SAFE_INTEGER - 1, 97)).toBe(30);
++});
++
++test('mod rejects a zero modulus', () => {
++  expect(() => mod(4, 0)).toThrow(Error);
++});
++
++test('mod rejects unsafe integer operands', () => {
++  expect(() => mod(Number.MAX_SAFE_INTEGER + 1, 7)).toThrow(Error);
++});
++
++test('extendedEuclidean returns a valid Bezout identity for positive inputs', () => {
++  const result = extendedEuclidean(240, 46);
++  expect(result.gcd).toBe(2);
++  expect((240 * result.x) + (46 * result.y)).toBe(result.gcd);
++});
++
++test('extendedEuclidean normalizes signed inputs', () => {
++  const result = extendedEuclidean(-99, 78);
++  expect(result.gcd).toBe(3);
++  expect((-99 * result.x) + (78 * result.y)).toBe(result.gcd);
++});
++
++test('extendedEuclidean rejects unsafe integers', () => {
++  expect(() => extendedEuclidean(Number.POSITIVE_INFINITY, 2)).toThrow(Error);
++});
++
++test('modularInverse returns normalized inverses', () => {
++  expect(modularInverse(3, 26)).toBe(9);
++  expect(modularInverse(-3, 11)).toBe(7);
++});
++
++test('modularInverse rejects non-coprime values', () => {
++  expect(() => modularInverse(6, 26)).toThrow(Error);
++});
++
++test('modularInverse rejects zero modulus deterministically', () => {
++  const firstError = (() => {
++    try { modularInverse(3, 0); } catch (error) { return error.message; }
++    return null;
++  })();
++  const secondError = (() => {
++    try { modularInverse(3, 0); } catch (error) { return error.message; }
++    return null;
++  })();
++  expect(firstError).toEqual(expect.any(String));
++  expect(secondError).toBe(firstError);
++});
++
++test('mod rejects a fractional dividend', () => {
++  expect(() => mod(1.5, 7)).toThrow(Error);
++});
++
++test('mod rejects a fractional modulus', () => {
++  expect(() => mod(7, 1.5)).toThrow(Error);
++});
++
++test('extendedEuclidean handles both negative operands', () => {
++  const result = extendedEuclidean(-240, -46);
++  expect(result.gcd).toBe(2);
++  expect((-240 * result.x) + (-46 * result.y)).toBe(result.gcd);
++});
++
++test('modularInverse normalizes a value larger than the modulus', () => {
++  expect(modularInverse(29, 26)).toBe(9);
++});
++
++test('modularInverse supports a negative modulus', () => {
++  expect(modularInverse(3, -26)).toBe(9);
++});
++
++test('modularInverse rejects an unsafe modulus', () => {
++  expect(() => modularInverse(3, Number.MAX_SAFE_INTEGER + 1)).toThrow(Error);
++});
++
++test('mod accepts a zero dividend', () => {
++  expect(mod(0, 7)).toBe(0);
++});
++
++test('mod normalizes a dividend below negative modulus', () => {
++  expect(mod(-1, 26)).toBe(25);
++});
++
++test('modularInverse returns one for a unit value', () => {
++  expect(modularInverse(1, 26)).toBe(1);
++});
++
++test('modularInverse returns the final residue inverse', () => {
++  expect(modularInverse(25, 26)).toBe(25);
++});
++
++test('extendedEuclidean handles a zero second operand', () => {
++  const result = extendedEuclidean(17, 0);
++  expect(result.gcd).toBe(17);
++  expect(17 * result.x).toBe(result.gcd);
++});
++
++test('extendedEuclidean handles a zero first operand', () => {
++  const result = extendedEuclidean(0, 17);
++  expect(result.gcd).toBe(17);
++  expect(17 * result.y).toBe(result.gcd);
++});
+diff --git a/hidden-tests/polynomialHashResidues.feature.test.js b/hidden-tests/polynomialHashResidues.feature.test.js
+new file mode 100644
+index 0000000..3376353
+--- /dev/null
++++ b/hidden-tests/polynomialHashResidues.feature.test.js
+@@ -0,0 +1,43 @@
++import PolynomialHash from '../src/algorithms/cryptography/polynomial-hash/PolynomialHash';
++
++test('PolynomialHash rolling residues stay non-negative for low trailing symbols', () => {
++  const polynomialHash = new PolynomialHash({ base: 37, modulus: 101 });
++  const words = ['za', 'a\u0000', '\u0000b', 'bc', 'c\u0000'];
++  let rollingHash = polynomialHash.hash(words[0]);
++  for (let index = 1; index < words.length; index += 1) {
++    rollingHash = polynomialHash.roll(rollingHash, words[index - 1], words[index]);
++    expect(rollingHash).toBeGreaterThanOrEqual(0);
++    expect(rollingHash).toBeLessThan(101);
++    expect(rollingHash).toBe(polynomialHash.hash(words[index]));
++  }
++});
++
++test('PolynomialHash remains normalized after deletion and re-append operations', () => {
++  const polynomialHash = new PolynomialHash({ base: 17, modulus: 97 });
++  const text = 'z\u0000az\u0000a';
++  const frameSize = 2;
++  let previousWord = text.slice(0, frameSize);
++  let previousHash = polynomialHash.hash(previousWord);
++  for (let offset = 1; offset <= text.length - frameSize; offset += 1) {
++    const currentWord = text.slice(offset, offset + frameSize);
++    const currentHash = polynomialHash.roll(previousHash, previousWord, currentWord);
++    expect(currentHash).toBeGreaterThanOrEqual(0);
++    expect(currentHash).toBeLessThan(97);
++    expect(currentHash).toBe(polynomialHash.hash(currentWord));
++    previousWord = currentWord;
++    previousHash = currentHash;
++  }
++});
++
++test('PolynomialHash configured modulus bounds direct and rolling hashes', () => {
++  const polynomialHash = new PolynomialHash({ base: 31, modulus: 13 });
++  const previousWord = '耀A';
++  const currentWord = 'A\u0000';
++  const previousHash = polynomialHash.hash(previousWord);
++  const rollingHash = polynomialHash.roll(previousHash, previousWord, currentWord);
++  expect(previousHash).toBeGreaterThanOrEqual(0);
++  expect(previousHash).toBeLessThan(13);
++  expect(rollingHash).toBeGreaterThanOrEqual(0);
++  expect(rollingHash).toBeLessThan(13);
++  expect(rollingHash).toBe(polynomialHash.hash(currentWord));
++});
+diff --git a/hidden-tests/railFenceValidation.feature.test.js b/hidden-tests/railFenceValidation.feature.test.js
+new file mode 100644
+index 0000000..6208750
+--- /dev/null
++++ b/hidden-tests/railFenceValidation.feature.test.js
+@@ -0,0 +1,30 @@
++import {
++  encodeRailFenceCipher,
++  decodeRailFenceCipher,
++} from '../src/algorithms/cryptography/rail-fence-cipher/railFenceCipher';
++
++test('Rail Fence encode rejects one rail', () => {
++  expect(() => encodeRailFenceCipher('ABCDE', 1)).toThrow(Error);
++});
++
++test('Rail Fence decode rejects one rail', () => {
++  expect(() => decodeRailFenceCipher('ABCDE', 1)).toThrow(Error);
++});
++
++test('Rail Fence encode rejects zero and negative rail counts', () => {
++  expect(() => encodeRailFenceCipher('ABCDE', 0)).toThrow(Error);
++  expect(() => encodeRailFenceCipher('ABCDE', -3)).toThrow(Error);
++});
++
++test('Rail Fence decode rejects zero and negative rail counts', () => {
++  expect(() => decodeRailFenceCipher('ABCDE', 0)).toThrow(Error);
++  expect(() => decodeRailFenceCipher('ABCDE', -3)).toThrow(Error);
++});
++
++test('Rail Fence encode rejects non-integer rail counts', () => {
++  expect(() => encodeRailFenceCipher('ABCDE', 2.5)).toThrow(Error);
++});
++
++test('Rail Fence decode rejects non-integer rail counts', () => {
++  expect(() => decodeRailFenceCipher('ABCDE', 2.5)).toThrow(Error);
++});
+diff --git a/hidden-tests/support/HarborJunitReporter.js b/hidden-tests/support/HarborJunitReporter.js
+new file mode 100644
+index 0000000..28d2e0d
+--- /dev/null
++++ b/hidden-tests/support/HarborJunitReporter.js
+@@ -0,0 +1,38 @@
++const fs = require('fs');
++const path = require('path');
++
++const escapeXml = (value) => String(value)
++  .replace(/&/g, '&amp;')
++  .replace(/</g, '&lt;')
++  .replace(/>/g, '&gt;')
++  .replace(/"/g, '&quot;')
++  .replace(/'/g, '&apos;');
++
++class HarborJunitReporter {
++  onRunComplete(contexts, results) {
++    const outputPath = process.env.HARBOR_JUNIT_PATH;
++    if (!outputPath) return;
++
++    const cases = [];
++    results.testResults.forEach((suite) => {
++      suite.testResults.forEach((assertion) => {
++        const name = escapeXml(assertion.fullName || assertion.title);
++        const className = escapeXml(path.relative(process.cwd(), suite.testFilePath));
++        const duration = Number.isFinite(assertion.duration) ? assertion.duration / 1000 : 0;
++        let body = '';
++        if (assertion.status === 'failed') {
++          body = `<failure message="test failed">${escapeXml(assertion.failureMessages.join('\n'))}</failure>`;
++        } else if (assertion.status === 'pending' || assertion.status === 'todo' || assertion.status === 'disabled') {
++          body = '<skipped />';
++        }
++        cases.push(`<testcase classname="${className}" name="${name}" time="${duration}">${body}</testcase>`);
++      });
++    });
++
++    const xml = `<?xml version="1.0" encoding="UTF-8"?>\n<testsuites tests="${results.numTotalTests}" failures="${results.numFailedTests}" skipped="${results.numPendingTests}" time="${results.runExecError ? 0 : results.startTime}"><testsuite name="jest" tests="${results.numTotalTests}" failures="${results.numFailedTests}" skipped="${results.numPendingTests}">${cases.join('')}</testsuite></testsuites>\n`;
++    fs.mkdirSync(path.dirname(outputPath), { recursive: true });
++    fs.writeFileSync(outputPath, xml);
++  }
++}
++
++module.exports = HarborJunitReporter;

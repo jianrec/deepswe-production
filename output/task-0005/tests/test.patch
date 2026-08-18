@@ -1,0 +1,1087 @@
+diff --git a/codex-rs/cli/tests/exec_limits_commands.rs b/codex-rs/cli/tests/exec_limits_commands.rs
+new file mode 100644
+index 0000000..a16d9b1
+--- /dev/null
++++ b/codex-rs/cli/tests/exec_limits_commands.rs
+@@ -0,0 +1,138 @@
++#[path = "support/exec_limits.rs"]
++mod support;
++
++use std::fs;
++use std::time::Duration;
++use support::MockResponsesServer;
++use support::command_response;
++use support::limit_events;
++use support::run_codex;
++use support::shell_write_command;
++use support::test_home;
++
++#[test]
++fn max_commands_runner_exits_with_code_seven() {
++    let marker_dir = tempfile::tempdir().unwrap();
++    let command = shell_write_command(&marker_dir.path().join("settled"), "yes", 50);
++    let server =
++        MockResponsesServer::start(vec![(Duration::ZERO, command_response("call-1", &command))]);
++    let home = test_home(&server, None);
++    let output = run_codex(
++        home.path(),
++        &[
++            "exec",
++            "--json",
++            "--skip-git-repo-check",
++            "--max-commands",
++            "1",
++            "run one command",
++        ],
++    );
++    assert_eq!(output.status.code(), Some(7));
++}
++
++#[test]
++fn max_commands_allows_started_command_to_settle() {
++    let marker_dir = tempfile::tempdir().unwrap();
++    let marker = marker_dir.path().join("settled");
++    let command = shell_write_command(&marker, "complete", 150);
++    let server =
++        MockResponsesServer::start(vec![(Duration::ZERO, command_response("call-1", &command))]);
++    let home = test_home(&server, None);
++    let output = run_codex(
++        home.path(),
++        &[
++            "exec",
++            "--json",
++            "--skip-git-repo-check",
++            "--max-commands",
++            "1",
++            "run one command",
++        ],
++    );
++    assert_eq!(output.status.code(), Some(7));
++    assert_eq!(fs::read_to_string(marker).unwrap(), "complete");
++}
++
++#[test]
++fn max_commands_emits_exactly_one_flattened_limit_event() {
++    let marker_dir = tempfile::tempdir().unwrap();
++    let command = shell_write_command(&marker_dir.path().join("settled"), "yes", 20);
++    let server =
++        MockResponsesServer::start(vec![(Duration::ZERO, command_response("call-1", &command))]);
++    let home = test_home(&server, None);
++    let output = run_codex(
++        home.path(),
++        &[
++            "exec",
++            "--json",
++            "--skip-git-repo-check",
++            "--max-commands",
++            "1",
++            "run one command",
++        ],
++    );
++    let events = limit_events(&output);
++    assert_eq!(events.len(), 1);
++    assert_eq!(events[0]["type"], "run_limit_reached");
++    assert_eq!(events[0]["reason"], "max_commands");
++    assert_eq!(events[0]["commands_started"], 1);
++    assert_eq!(events[0]["max_commands"], 1);
++    assert!(events[0]["elapsed_ms"].is_u64());
++    assert!(events[0]["max_wall_time_ms"].is_null());
++}
++
++#[test]
++fn max_commands_interrupts_before_another_command_starts() {
++    let marker_dir = tempfile::tempdir().unwrap();
++    let first = shell_write_command(&marker_dir.path().join("first"), "yes", 20);
++    let second = shell_write_command(&marker_dir.path().join("second"), "no", 20);
++    let server = MockResponsesServer::start(vec![
++        (Duration::ZERO, command_response("call-1", &first)),
++        (Duration::ZERO, command_response("call-2", &second)),
++    ]);
++    let home = test_home(&server, None);
++    let output = run_codex(
++        home.path(),
++        &[
++            "exec",
++            "--json",
++            "--skip-git-repo-check",
++            "--max-commands",
++            "1",
++            "run commands",
++        ],
++    );
++    assert_eq!(output.status.code(), Some(7));
++    assert!(marker_dir.path().join("first").exists());
++    assert!(!marker_dir.path().join("second").exists());
++    assert_eq!(server.request_count(), 1);
++}
++
++#[test]
++fn command_reason_wins_when_wall_time_also_elapsed() {
++    let marker_dir = tempfile::tempdir().unwrap();
++    let command = shell_write_command(&marker_dir.path().join("settled"), "yes", 5200);
++    let server =
++        MockResponsesServer::start(vec![(Duration::ZERO, command_response("call-1", &command))]);
++    let home = test_home(&server, None);
++    let output = run_codex(
++        home.path(),
++        &[
++            "exec",
++            "--json",
++            "--skip-git-repo-check",
++            "--max-commands",
++            "1",
++            "--max-wall-time",
++            "5s",
++            "run one command",
++        ],
++    );
++    let events = limit_events(&output);
++    assert_eq!(output.status.code(), Some(7));
++    assert_eq!(events.len(), 1);
++    assert_eq!(events[0]["reason"], "max_commands");
++    assert_eq!(events[0]["max_commands"], 1);
++    assert_eq!(events[0]["max_wall_time_ms"], 5000);
++}
+diff --git a/codex-rs/cli/tests/exec_limits_config.rs b/codex-rs/cli/tests/exec_limits_config.rs
+new file mode 100644
+index 0000000..5e09f35
+--- /dev/null
++++ b/codex-rs/cli/tests/exec_limits_config.rs
+@@ -0,0 +1,106 @@
++#[path = "support/exec_limits.rs"]
++mod support;
++
++use std::fs;
++use std::time::Duration;
++use support::MockResponsesServer;
++use support::assistant_response;
++use support::command_response;
++use support::limit_events;
++use support::run_codex;
++use support::shell_write_command;
++use support::test_home;
++
++#[test]
++fn config_max_commands_is_honored() {
++    let marker_dir = tempfile::tempdir().unwrap();
++    let command = shell_write_command(&marker_dir.path().join("first"), "yes", 20);
++    let server =
++        MockResponsesServer::start(vec![(Duration::ZERO, command_response("call-1", &command))]);
++    let home = test_home(&server, Some("[exec]\nmax_commands = 1\n"));
++    let output = run_codex(
++        home.path(),
++        &["exec", "--json", "--skip-git-repo-check", "run"],
++    );
++    assert_eq!(output.status.code(), Some(7));
++    assert_eq!(limit_events(&output)[0]["max_commands"], 1);
++}
++
++#[test]
++fn config_max_wall_time_is_honored() {
++    let server =
++        MockResponsesServer::start(vec![(Duration::from_secs(2), assistant_response("late"))]);
++    let home = test_home(&server, Some("[exec]\nmax_wall_time = '100ms'\n"));
++    let output = run_codex(
++        home.path(),
++        &["exec", "--json", "--skip-git-repo-check", "wait"],
++    );
++    assert_eq!(output.status.code(), Some(7));
++    assert_eq!(limit_events(&output)[0]["reason"], "max_wall_time");
++}
++
++#[test]
++fn cli_max_commands_overrides_config_value() {
++    let marker_dir = tempfile::tempdir().unwrap();
++    let first_marker = marker_dir.path().join("first");
++    let second_marker = marker_dir.path().join("second");
++    let first = shell_write_command(&first_marker, "one", 20);
++    let second = shell_write_command(&second_marker, "two", 20);
++    let server = MockResponsesServer::start(vec![
++        (Duration::ZERO, command_response("call-1", &first)),
++        (Duration::ZERO, command_response("call-2", &second)),
++    ]);
++    let home = test_home(&server, Some("[exec]\nmax_commands = 1\n"));
++    let output = run_codex(
++        home.path(),
++        &[
++            "exec",
++            "--json",
++            "--skip-git-repo-check",
++            "--max-commands",
++            "2",
++            "run twice",
++        ],
++    );
++    assert_eq!(output.status.code(), Some(7));
++    assert_eq!(fs::read_to_string(first_marker).unwrap(), "one");
++    assert_eq!(fs::read_to_string(second_marker).unwrap(), "two");
++    let events = limit_events(&output);
++    assert_eq!(events.len(), 1);
++    assert_eq!(events[0]["commands_started"], 2);
++    assert_eq!(events[0]["max_commands"], 2);
++}
++
++#[test]
++fn cli_max_wall_time_overrides_config_value() {
++    let server = MockResponsesServer::start(vec![(
++        Duration::from_millis(300),
++        assistant_response("done"),
++    )]);
++    let home = test_home(&server, Some("[exec]\nmax_wall_time = '50ms'\n"));
++    let output = run_codex(
++        home.path(),
++        &[
++            "exec",
++            "--json",
++            "--skip-git-repo-check",
++            "--max-wall-time",
++            "5s",
++            "finish",
++        ],
++    );
++    assert_eq!(output.status.code(), Some(0));
++    assert!(limit_events(&output).is_empty());
++}
++
++#[test]
++fn default_unbounded_run_has_no_limit_event() {
++    let server = MockResponsesServer::start(vec![(Duration::ZERO, assistant_response("done"))]);
++    let home = test_home(&server, None);
++    let output = run_codex(
++        home.path(),
++        &["exec", "--json", "--skip-git-repo-check", "finish"],
++    );
++    assert_eq!(output.status.code(), Some(0));
++    assert!(limit_events(&output).is_empty());
++}
+diff --git a/codex-rs/cli/tests/exec_limits_output_and_validation.rs b/codex-rs/cli/tests/exec_limits_output_and_validation.rs
+new file mode 100644
+index 0000000..da72d7d
+--- /dev/null
++++ b/codex-rs/cli/tests/exec_limits_output_and_validation.rs
+@@ -0,0 +1,98 @@
++#[path = "support/exec_limits.rs"]
++mod support;
++
++use std::time::Duration;
++use support::MockResponsesServer;
++use support::assistant_response;
++use support::combined_output;
++use support::command_response;
++use support::run_codex;
++use support::shell_write_command;
++use support::test_home;
++
++#[test]
++fn human_output_prints_one_single_line_limit_notice() {
++    let marker_dir = tempfile::tempdir().unwrap();
++    let command = shell_write_command(&marker_dir.path().join("settled"), "yes", 20);
++    let server =
++        MockResponsesServer::start(vec![(Duration::ZERO, command_response("call-1", &command))]);
++    let home = test_home(&server, None);
++    let output = run_codex(
++        home.path(),
++        &[
++            "exec",
++            "--skip-git-repo-check",
++            "--max-commands",
++            "1",
++            "run",
++        ],
++    );
++    assert_eq!(output.status.code(), Some(7));
++    let output_text = combined_output(&output);
++    let notices: Vec<_> = output_text
++        .lines()
++        .filter(|line| line.to_ascii_lowercase().contains("run limit reached"))
++        .collect();
++    assert_eq!(notices.len(), 1);
++    assert!(!notices[0].contains('\n'));
++    assert!(notices[0].contains("max_commands"));
++}
++
++fn assert_invalid_wall_time(raw: &str) {
++    let server =
++        MockResponsesServer::start(vec![(Duration::ZERO, assistant_response("unexpected"))]);
++    let home = test_home(&server, None);
++    let option = format!("--max-wall-time={raw}");
++    let output = run_codex(
++        home.path(),
++        &[
++            "exec",
++            "--json",
++            "--skip-git-repo-check",
++            &option,
++            "must not start",
++        ],
++    );
++    assert!(!output.status.success());
++    assert_eq!(server.request_count(), 0);
++    let text = combined_output(&output).to_ascii_lowercase();
++    assert!(text.contains("max-wall-time") || text.contains("duration"));
++}
++
++#[test]
++fn cli_rejects_zero_wall_time_before_server_request() {
++    assert_invalid_wall_time("0");
++}
++
++#[test]
++fn cli_rejects_zero_millisecond_wall_time_before_server_request() {
++    assert_invalid_wall_time("0ms");
++}
++
++#[test]
++fn cli_rejects_negative_wall_time_before_server_request() {
++    assert_invalid_wall_time("-1s");
++}
++
++#[test]
++fn cli_rejects_unparseable_wall_time_before_server_request() {
++    assert_invalid_wall_time("forever");
++}
++
++#[test]
++fn config_rejects_invalid_wall_time_before_server_request() {
++    let server =
++        MockResponsesServer::start(vec![(Duration::ZERO, assistant_response("unexpected"))]);
++    let home = test_home(&server, Some("[exec]\nmax_wall_time = 'invalid'\n"));
++    let output = run_codex(
++        home.path(),
++        &["exec", "--json", "--skip-git-repo-check", "must not start"],
++    );
++    assert!(!output.status.success());
++    assert_eq!(server.request_count(), 0);
++    assert!(
++        combined_output(&output)
++            .to_ascii_lowercase()
++            .contains("max_wall_time")
++    );
++}
+diff --git a/codex-rs/cli/tests/exec_limits_wall_time.rs b/codex-rs/cli/tests/exec_limits_wall_time.rs
+new file mode 100644
+index 0000000..8f9dd76
+--- /dev/null
++++ b/codex-rs/cli/tests/exec_limits_wall_time.rs
+@@ -0,0 +1,75 @@
++#[path = "support/exec_limits.rs"]
++mod support;
++
++use std::time::Duration;
++use std::time::Instant;
++use support::MockResponsesServer;
++use support::assistant_response;
++use support::limit_events;
++use support::run_codex;
++use support::test_home;
++
++#[test]
++fn max_wall_time_stops_while_runner_waits_for_response() {
++    let server =
++        MockResponsesServer::start(vec![(Duration::from_secs(30), assistant_response("late"))]);
++    let home = test_home(&server, None);
++    let started = Instant::now();
++    let output = run_codex(
++        home.path(),
++        &[
++            "exec",
++            "--json",
++            "--skip-git-repo-check",
++            "--max-wall-time",
++            "100ms",
++            "wait",
++        ],
++    );
++    assert_eq!(output.status.code(), Some(7));
++    assert!(started.elapsed() < Duration::from_secs(30));
++}
++
++#[test]
++fn max_wall_time_emits_exactly_one_wall_limit_event() {
++    let server =
++        MockResponsesServer::start(vec![(Duration::from_secs(2), assistant_response("late"))]);
++    let home = test_home(&server, None);
++    let output = run_codex(
++        home.path(),
++        &[
++            "exec",
++            "--json",
++            "--skip-git-repo-check",
++            "--max-wall-time",
++            "100ms",
++            "wait",
++        ],
++    );
++    let events = limit_events(&output);
++    assert_eq!(events.len(), 1);
++    assert_eq!(events[0]["reason"], "max_wall_time");
++    assert_eq!(events[0]["commands_started"], 0);
++    assert_eq!(events[0]["max_wall_time_ms"], 100);
++    assert!(events[0]["max_commands"].is_null());
++    assert!(events[0]["elapsed_ms"].as_u64().unwrap() >= 100);
++}
++
++#[test]
++fn bare_seconds_wall_time_is_accepted_by_cli() {
++    let server = MockResponsesServer::start(vec![(Duration::ZERO, assistant_response("done"))]);
++    let home = test_home(&server, None);
++    let output = run_codex(
++        home.path(),
++        &[
++            "exec",
++            "--json",
++            "--skip-git-repo-check",
++            "--max-wall-time",
++            "30",
++            "finish",
++        ],
++    );
++    assert_eq!(output.status.code(), Some(0));
++    assert!(limit_events(&output).is_empty());
++}
+diff --git a/codex-rs/cli/tests/limit_exit_code.rs b/codex-rs/cli/tests/limit_exit_code.rs
+new file mode 100644
+index 0000000..15fa063
+--- /dev/null
++++ b/codex-rs/cli/tests/limit_exit_code.rs
+@@ -0,0 +1,11 @@
++use codex_exec::EXIT_CODE_RUN_LIMIT_REACHED;
++
++#[test]
++fn run_limit_exit_code_is_seven() {
++    assert_eq!(EXIT_CODE_RUN_LIMIT_REACHED, 7);
++}
++
++#[test]
++fn run_limit_exit_code_is_non_success() {
++    assert_ne!(EXIT_CODE_RUN_LIMIT_REACHED, 0);
++}
+diff --git a/codex-rs/cli/tests/limits_accounting.rs b/codex-rs/cli/tests/limits_accounting.rs
+new file mode 100644
+index 0000000..a0e3012
+--- /dev/null
++++ b/codex-rs/cli/tests/limits_accounting.rs
+@@ -0,0 +1,168 @@
++use codex_exec::limits::LimitReason;
++use codex_exec::limits::LimitTracker;
++use codex_exec::limits::RunLimits;
++use std::time::Duration;
++use std::time::Instant;
++
++fn new_tracker(limits: RunLimits) -> (LimitTracker, Instant) {
++    let started_at = Instant::now();
++    (LimitTracker::new(limits, started_at), started_at)
++}
++
++#[test]
++fn no_limits_are_unbounded() {
++    assert!(
++        RunLimits {
++            max_commands: None,
++            max_wall_time: None,
++        }
++        .is_unbounded()
++    );
++}
++
++#[test]
++fn command_limit_is_bounded() {
++    assert!(
++        !RunLimits {
++            max_commands: Some(2),
++            max_wall_time: None,
++        }
++        .is_unbounded()
++    );
++}
++
++#[test]
++fn wall_limit_is_bounded() {
++    assert!(
++        !RunLimits {
++            max_commands: None,
++            max_wall_time: Some(Duration::from_secs(2)),
++        }
++        .is_unbounded()
++    );
++}
++
++#[test]
++fn tracker_initially_reports_zero_commands() {
++    let (tracker, _) = new_tracker(RunLimits {
++        max_commands: Some(3),
++        max_wall_time: None,
++    });
++    assert_eq!(tracker.commands_started(), 0);
++}
++
++#[test]
++fn record_command_started_increments_count() {
++    let (mut tracker, _) = new_tracker(RunLimits {
++        max_commands: Some(3),
++        max_wall_time: None,
++    });
++    tracker.record_command_started();
++    assert_eq!(tracker.commands_started(), 1);
++}
++
++#[test]
++fn command_count_is_monotonic() {
++    let (mut tracker, _) = new_tracker(RunLimits {
++        max_commands: Some(10),
++        max_wall_time: None,
++    });
++    for expected in 1..=10 {
++        tracker.record_command_started();
++        assert_eq!(tracker.commands_started(), expected);
++    }
++}
++
++#[test]
++fn command_limit_is_inactive_before_threshold() {
++    let (mut tracker, started_at) = new_tracker(RunLimits {
++        max_commands: Some(2),
++        max_wall_time: None,
++    });
++    tracker.record_command_started();
++    assert_eq!(tracker.evaluate(started_at), None);
++}
++
++#[test]
++fn command_limit_is_active_at_threshold() {
++    let (mut tracker, started_at) = new_tracker(RunLimits {
++        max_commands: Some(2),
++        max_wall_time: None,
++    });
++    tracker.record_command_started();
++    tracker.record_command_started();
++    assert_eq!(tracker.evaluate(started_at), Some(LimitReason::MaxCommands));
++}
++
++#[test]
++fn command_limit_remains_active_after_threshold() {
++    let (mut tracker, started_at) = new_tracker(RunLimits {
++        max_commands: Some(1),
++        max_wall_time: None,
++    });
++    tracker.record_command_started();
++    tracker.record_command_started();
++    assert_eq!(tracker.evaluate(started_at), Some(LimitReason::MaxCommands));
++}
++
++#[test]
++fn wall_limit_is_inactive_before_boundary() {
++    let (tracker, started_at) = new_tracker(RunLimits {
++        max_commands: None,
++        max_wall_time: Some(Duration::from_millis(10)),
++    });
++    assert_eq!(
++        tracker.evaluate(started_at + Duration::from_millis(9)),
++        None
++    );
++}
++
++#[test]
++fn wall_limit_is_active_at_boundary() {
++    let (tracker, started_at) = new_tracker(RunLimits {
++        max_commands: None,
++        max_wall_time: Some(Duration::from_millis(10)),
++    });
++    assert_eq!(
++        tracker.evaluate(started_at + Duration::from_millis(10)),
++        Some(LimitReason::MaxWallTime)
++    );
++}
++
++#[test]
++fn command_limit_wins_when_both_are_active() {
++    let (mut tracker, started_at) = new_tracker(RunLimits {
++        max_commands: Some(1),
++        max_wall_time: Some(Duration::from_millis(10)),
++    });
++    tracker.record_command_started();
++    assert_eq!(
++        tracker.evaluate(started_at + Duration::from_millis(10)),
++        Some(LimitReason::MaxCommands)
++    );
++}
++
++#[test]
++fn unbounded_tracker_never_triggers() {
++    let (mut tracker, started_at) = new_tracker(RunLimits {
++        max_commands: None,
++        max_wall_time: None,
++    });
++    for _ in 0..100 {
++        tracker.record_command_started();
++    }
++    assert_eq!(
++        tracker.evaluate(started_at + Duration::from_secs(86_400)),
++        None
++    );
++}
++
++#[test]
++fn max_commands_reason_has_stable_name() {
++    assert_eq!(LimitReason::MaxCommands.as_str(), "max_commands");
++}
++
++#[test]
++fn max_wall_time_reason_has_stable_name() {
++    assert_eq!(LimitReason::MaxWallTime.as_str(), "max_wall_time");
++}
+diff --git a/codex-rs/cli/tests/limits_conversion.rs b/codex-rs/cli/tests/limits_conversion.rs
+new file mode 100644
+index 0000000..3ec9c15
+--- /dev/null
++++ b/codex-rs/cli/tests/limits_conversion.rs
+@@ -0,0 +1,62 @@
++use codex_config::ExecLimits;
++use codex_exec::limits::RunLimits;
++use std::time::Duration;
++
++#[test]
++fn converts_empty_resolved_exec_limits() {
++    let converted = RunLimits::from_exec_limits(&ExecLimits {
++        max_commands: None,
++        max_wall_time: None,
++    });
++    assert_eq!(converted.max_commands, None);
++    assert_eq!(converted.max_wall_time, None);
++    assert!(converted.is_unbounded());
++}
++
++#[test]
++fn converts_resolved_command_limit() {
++    let converted = RunLimits::from_exec_limits(&ExecLimits {
++        max_commands: Some(12),
++        max_wall_time: None,
++    });
++    assert_eq!(converted.max_commands, Some(12));
++    assert_eq!(converted.max_wall_time, None);
++}
++
++#[test]
++fn converts_resolved_wall_limit() {
++    let converted = RunLimits::from_exec_limits(&ExecLimits {
++        max_commands: None,
++        max_wall_time: Some(Duration::from_millis(750)),
++    });
++    assert_eq!(converted.max_commands, None);
++    assert_eq!(converted.max_wall_time, Some(Duration::from_millis(750)));
++}
++
++#[test]
++fn converts_both_resolved_limits() {
++    let converted = RunLimits::from_exec_limits(&ExecLimits {
++        max_commands: Some(4),
++        max_wall_time: Some(Duration::from_secs(2)),
++    });
++    assert_eq!(converted.max_commands, Some(4));
++    assert_eq!(converted.max_wall_time, Some(Duration::from_secs(2)));
++}
++
++#[test]
++fn conversion_preserves_large_command_limit() {
++    let converted = RunLimits::from_exec_limits(&ExecLimits {
++        max_commands: Some(u64::MAX),
++        max_wall_time: None,
++    });
++    assert_eq!(converted.max_commands, Some(u64::MAX));
++}
++
++#[test]
++fn conversion_preserves_millisecond_precision() {
++    let converted = RunLimits::from_exec_limits(&ExecLimits {
++        max_commands: None,
++        max_wall_time: Some(Duration::from_millis(1)),
++    });
++    assert_eq!(converted.max_wall_time, Some(Duration::from_millis(1)));
++}
+diff --git a/codex-rs/cli/tests/support/exec_limits.rs b/codex-rs/cli/tests/support/exec_limits.rs
+new file mode 100644
+index 0000000..797de7f
+--- /dev/null
++++ b/codex-rs/cli/tests/support/exec_limits.rs
+@@ -0,0 +1,227 @@
++use serde_json::Value;
++use serde_json::json;
++use std::fs;
++use std::io::Read;
++use std::io::Write;
++use std::net::TcpListener;
++use std::net::TcpStream;
++use std::path::Path;
++use std::path::PathBuf;
++use std::process::Command;
++use std::process::Output;
++use std::sync::Arc;
++use std::sync::atomic::AtomicUsize;
++use std::sync::atomic::Ordering;
++use std::thread;
++use std::time::Duration;
++use tempfile::TempDir;
++
++pub struct MockResponsesServer {
++    address: String,
++    requests: Arc<AtomicUsize>,
++    _worker: thread::JoinHandle<()>,
++}
++
++impl MockResponsesServer {
++    pub fn start(responses: Vec<(Duration, String)>) -> Self {
++        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
++        let address = listener.local_addr().unwrap().to_string();
++        let requests = Arc::new(AtomicUsize::new(0));
++        let request_counter = requests.clone();
++        let worker = thread::spawn(move || {
++            for stream in listener.incoming() {
++                let mut stream = stream.unwrap();
++                read_request(&mut stream);
++                let index = request_counter.fetch_add(1, Ordering::SeqCst);
++                let (delay, body) = responses
++                    .get(index)
++                    .cloned()
++                    .unwrap_or_else(|| (Duration::ZERO, assistant_response("done")));
++                thread::sleep(delay);
++                write_response(&mut stream, &body);
++            }
++        });
++        Self {
++            address,
++            requests,
++            _worker: worker,
++        }
++    }
++
++    pub fn base_url(&self) -> String {
++        format!("http://{}", self.address)
++    }
++
++    pub fn request_count(&self) -> usize {
++        self.requests.load(Ordering::SeqCst)
++    }
++}
++
++fn read_request(stream: &mut TcpStream) {
++    stream
++        .set_read_timeout(Some(Duration::from_secs(2)))
++        .unwrap();
++    let mut bytes = Vec::new();
++    let mut buffer = [0_u8; 4096];
++    loop {
++        match stream.read(&mut buffer) {
++            Ok(0) | Err(_) => break,
++            Ok(count) => {
++                bytes.extend_from_slice(&buffer[..count]);
++                if bytes.windows(4).any(|window| window == b"\r\n\r\n") {
++                    break;
++                }
++            }
++        }
++    }
++}
++
++fn write_response(stream: &mut TcpStream, body: &str) {
++    let response = format!(
++        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
++        body.len(),
++        body
++    );
++    stream.write_all(response.as_bytes()).unwrap();
++    stream.flush().unwrap();
++}
++
++fn sse(event: Value) -> String {
++    format!("data: {}\n\n", serde_json::to_string(&event).unwrap())
++}
++
++fn completed_response(response_id: &str) -> Value {
++    json!({
++        "type": "response.completed",
++        "sequence_number": 1,
++        "response": {
++            "id": response_id,
++            "object": "response",
++            "created_at": 0,
++            "status": "completed",
++            "error": null,
++            "incomplete_details": null,
++            "instructions": null,
++            "max_output_tokens": null,
++            "model": "test-model",
++            "output": [],
++            "parallel_tool_calls": true,
++            "previous_response_id": null,
++            "reasoning": {"effort": null, "summary": null},
++            "store": false,
++            "temperature": null,
++            "text": {"format": {"type": "text"}},
++            "tool_choice": "auto",
++            "tools": [],
++            "top_p": null,
++            "truncation": "disabled",
++            "usage": null,
++            "metadata": {}
++        }
++    })
++}
++
++pub fn command_response(call_id: &str, command: &str) -> String {
++    let arguments = serde_json::to_string(&json!({"command": command})).unwrap();
++    let function_call = json!({
++        "type": "response.output_item.done",
++        "sequence_number": 0,
++        "output_index": 0,
++        "item": {
++            "id": call_id,
++            "type": "function_call",
++            "status": "completed",
++            "arguments": arguments,
++            "call_id": call_id,
++            "name": "shell_command"
++        }
++    });
++    format!(
++        "{}{}",
++        sse(function_call),
++        sse(completed_response("response-command"))
++    )
++}
++
++pub fn assistant_response(text: &str) -> String {
++    let message = json!({
++        "type": "response.output_item.done",
++        "sequence_number": 0,
++        "output_index": 0,
++        "item": {
++            "id": "message-1",
++            "type": "message",
++            "status": "completed",
++            "role": "assistant",
++            "content": [{"type": "output_text", "text": text, "annotations": []}]
++        }
++    });
++    format!(
++        "{}{}",
++        sse(message),
++        sse(completed_response("response-message"))
++    )
++}
++
++pub fn test_home(server: &MockResponsesServer, exec_table: Option<&str>) -> TempDir {
++    let home = tempfile::tempdir().unwrap();
++    let mut config = format!(
++        "model = 'test-model'\nmodel_provider = 'mock'\n[model_providers.mock]\nname = 'mock'\nbase_url = '{}'\nwire_api = 'responses'\nrequires_openai_auth = false\n",
++        server.base_url()
++    );
++    if let Some(exec_table) = exec_table {
++        config.push_str(exec_table);
++    }
++    fs::write(home.path().join("config.toml"), config).unwrap();
++    home
++}
++
++pub fn run_codex(home: &Path, arguments: &[&str]) -> Output {
++    let binary = codex_utils_cargo_bin::cargo_bin("codex").unwrap();
++    let mut command = Command::new(binary);
++    command.env("CODEX_HOME", home).env("RUST_LOG", "off");
++    if let Some((first, rest)) = arguments.split_first() {
++        command.arg(first);
++        if *first == "exec" {
++            command.args(["-s", "danger-full-access"]);
++        }
++        command.args(rest);
++    }
++    command.output().unwrap()
++}
++
++pub fn json_events(output: &Output) -> Vec<Value> {
++    String::from_utf8_lossy(&output.stdout)
++        .lines()
++        .filter_map(|line| serde_json::from_str(line).ok())
++        .collect()
++}
++
++pub fn limit_events(output: &Output) -> Vec<Value> {
++    json_events(output)
++        .into_iter()
++        .filter(|event| event["type"] == "run_limit_reached")
++        .collect()
++}
++
++pub fn combined_output(output: &Output) -> String {
++    format!(
++        "{}{}",
++        String::from_utf8_lossy(&output.stdout),
++        String::from_utf8_lossy(&output.stderr)
++    )
++}
++
++pub fn shell_write_command(path: &Path, value: &str, delay_ms: u64) -> String {
++    format!(
++        "sh -c 'sleep {}; printf %s {} > {}'",
++        delay_ms as f64 / 1000.0,
++        value,
++        shell_quote(path)
++    )
++}
++
++fn shell_quote(path: &Path) -> String {
++    let path: PathBuf = path.to_path_buf();
++    format!("'{}'", path.display().to_string().replace('\'', "'\\''"))
++}
+diff --git a/codex-rs/config/tests/exec_limits_parsing.rs b/codex-rs/config/tests/exec_limits_parsing.rs
+new file mode 100644
+index 0000000..aa00556
+--- /dev/null
++++ b/codex-rs/config/tests/exec_limits_parsing.rs
+@@ -0,0 +1,95 @@
++use codex_config::config_toml::parse_wall_time;
++use std::time::Duration;
++
++#[test]
++fn parses_bare_integer_as_seconds() {
++    assert_eq!(parse_wall_time("30").unwrap(), Duration::from_secs(30));
++}
++
++#[test]
++fn parses_one_bare_second() {
++    assert_eq!(parse_wall_time("1").unwrap(), Duration::from_secs(1));
++}
++
++#[test]
++fn parses_millisecond_suffix() {
++    assert_eq!(
++        parse_wall_time("500ms").unwrap(),
++        Duration::from_millis(500)
++    );
++}
++
++#[test]
++fn parses_one_millisecond() {
++    assert_eq!(parse_wall_time("1ms").unwrap(), Duration::from_millis(1));
++}
++
++#[test]
++fn parses_seconds_suffix() {
++    assert_eq!(parse_wall_time("90s").unwrap(), Duration::from_secs(90));
++}
++
++#[test]
++fn parses_minutes_suffix() {
++    assert_eq!(parse_wall_time("10m").unwrap(), Duration::from_secs(600));
++}
++
++#[test]
++fn parses_hours_suffix() {
++    assert_eq!(parse_wall_time("2h").unwrap(), Duration::from_secs(7200));
++}
++
++#[test]
++fn rejects_empty_duration() {
++    assert!(parse_wall_time("").is_err());
++}
++
++#[test]
++fn rejects_whitespace_only_duration() {
++    assert!(parse_wall_time("   ").is_err());
++}
++
++#[test]
++fn rejects_zero_bare_seconds() {
++    assert!(parse_wall_time("0").is_err());
++}
++
++#[test]
++fn rejects_zero_milliseconds() {
++    assert!(parse_wall_time("0ms").is_err());
++}
++
++#[test]
++fn rejects_zero_suffixed_seconds() {
++    assert!(parse_wall_time("0s").is_err());
++}
++
++#[test]
++fn rejects_negative_duration() {
++    assert!(parse_wall_time("-1s").is_err());
++}
++
++#[test]
++fn rejects_decimal_duration() {
++    assert!(parse_wall_time("1.5s").is_err());
++}
++
++#[test]
++fn rejects_unknown_suffix() {
++    assert!(parse_wall_time("3d").is_err());
++}
++
++#[test]
++fn rejects_suffix_without_number() {
++    assert!(parse_wall_time("ms").is_err());
++}
++
++#[test]
++fn rejects_non_numeric_duration() {
++    assert!(parse_wall_time("forever").is_err());
++}
++
++#[test]
++fn rejects_overflowing_hours() {
++    assert!(parse_wall_time("18446744073709551615h").is_err());
++}
+diff --git a/codex-rs/config/tests/exec_limits_toml.rs b/codex-rs/config/tests/exec_limits_toml.rs
+new file mode 100644
+index 0000000..ad1fd4b
+--- /dev/null
++++ b/codex-rs/config/tests/exec_limits_toml.rs
+@@ -0,0 +1,47 @@
++use codex_config::config_toml::ConfigToml;
++use codex_config::config_toml::ExecLimitsToml;
++
++#[test]
++fn deserializes_both_exec_limit_keys() {
++    let config: ConfigToml =
++        toml::from_str("[exec]\nmax_commands = 7\nmax_wall_time = '2m'\n").unwrap();
++    let exec = config.exec.unwrap();
++    assert_eq!(exec.max_commands, Some(7));
++    assert_eq!(exec.max_wall_time.as_deref(), Some("2m"));
++}
++
++#[test]
++fn missing_exec_table_remains_none() {
++    let config: ConfigToml = toml::from_str("").unwrap();
++    assert_eq!(config.exec, None);
++}
++
++#[test]
++fn exec_limits_toml_default_has_no_limits() {
++    let exec = ExecLimitsToml::default();
++    assert_eq!(exec.max_commands, None);
++    assert_eq!(exec.max_wall_time, None);
++}
++
++#[test]
++fn rejects_string_max_commands() {
++    let result: Result<ConfigToml, _> = toml::from_str("[exec]\nmax_commands = '7'\n");
++    assert!(result.is_err());
++}
++
++#[test]
++fn rejects_integer_max_wall_time() {
++    let result: Result<ConfigToml, _> = toml::from_str("[exec]\nmax_wall_time = 7\n");
++    assert!(result.is_err());
++}
++
++#[test]
++fn exec_limits_toml_round_trips() {
++    let original = ExecLimitsToml {
++        max_commands: Some(3),
++        max_wall_time: Some("1h".to_string()),
++    };
++    let encoded = toml::to_string(&original).unwrap();
++    let decoded: ExecLimitsToml = toml::from_str(&encoded).unwrap();
++    assert_eq!(decoded, original);
++}

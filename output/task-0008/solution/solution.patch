@@ -1,0 +1,764 @@
+diff --git a/searches/binary_search.py b/searches/binary_search.py
+index bec87b3..f1f4891 100644
+--- a/searches/binary_search.py
++++ b/searches/binary_search.py
+@@ -11,7 +11,11 @@ python3 binary_search.py
+ """
+ 
+ import bisect
++from collections.abc import Callable
+ from itertools import pairwise
++from typing import Any
++
++from sorts.comparator import _compare_key_values, _key_values, resolve_key
+ 
+ 
+ def bisect_left(
+@@ -177,7 +181,13 @@ def insort_right(
+     sorted_collection.insert(bisect_right(sorted_collection, item, lo, hi), item)
+ 
+ 
+-def binary_search(sorted_collection: list[int], item: int) -> int:
++def binary_search(
++    sorted_collection: list[int],
++    item: int,
++    *,
++    key: Callable[[Any], Any] | None = None,
++    reverse: bool = False,
++) -> int:
+     """Pure implementation of a binary search algorithm in Python
+ 
+     Be careful collection must be ascending sorted otherwise, the result will be
+@@ -185,6 +195,8 @@ def binary_search(sorted_collection: list[int], item: int) -> int:
+ 
+     :param sorted_collection: some ascending sorted collection with comparable items
+     :param item: item value to search
++    :param key: optional callable mapping each element (and ``item``) to a key
++    :param reverse: when True, ``sorted_collection`` is treated as descending by key
+     :return: index of the found item or -1 if the item is not found
+ 
+     Examples:
+@@ -196,18 +208,39 @@ def binary_search(sorted_collection: list[int], item: int) -> int:
+     1
+     >>> binary_search([0, 5, 7, 10, 15], 6)
+     -1
++
++    Search by a derived key, over a natural-key reverse-ordered collection:
++
++    >>> from sorts.merge_sort import merge_sort
++    >>> from strings.natural_key import natural_sort_key
++    >>> files = merge_sort(
++    ...     ['img10', 'img2', 'img1'], key=natural_sort_key, reverse=True
++    ... )
++    >>> files
++    ['img10', 'img2', 'img1']
++    >>> binary_search(files, 'img2', key=natural_sort_key, reverse=True)
++    1
++    >>> binary_search(files, 'img7', key=natural_sort_key, reverse=True)
++    -1
+     """
+-    if any(a > b for a, b in pairwise(sorted_collection)):
++    keys = _key_values(sorted_collection, key)
++    if any(
++        _compare_key_values(a, b, reverse=reverse) > 0
++        for a, b in pairwise(keys)
++    ):
+         raise ValueError("sorted_collection must be sorted in ascending order")
++    target_key = resolve_key(key)(item)
+     left = 0
+     right = len(sorted_collection) - 1
+ 
+     while left <= right:
+         midpoint = left + (right - left) // 2
+-        current_item = sorted_collection[midpoint]
+-        if current_item == item:
++        comparison = _compare_key_values(
++            keys[midpoint], target_key, reverse=reverse
++        )
++        if comparison == 0:
+             return midpoint
+-        elif item < current_item:
++        elif comparison > 0:
+             right = midpoint - 1
+         else:
+             left = midpoint + 1
+diff --git a/searches/interpolation_search.py b/searches/interpolation_search.py
+index cb3e001..748c3d4 100644
+--- a/searches/interpolation_search.py
++++ b/searches/interpolation_search.py
+@@ -2,8 +2,17 @@
+ This is pure Python implementation of interpolation search algorithm
+ """
+ 
++from typing import Any, Callable
+ 
+-def interpolation_search(sorted_collection: list[int], item: int) -> int | None:
++from sorts.comparator import resolve_key
++
++
++def interpolation_search(
++    sorted_collection: list[int],
++    item: int,
++    *,
++    key: Callable[[Any], float] | None = None,
++) -> int | None:
+     """
+     Searches for an item in a sorted collection by interpolation search algorithm.
+ 
+@@ -38,27 +47,40 @@ def interpolation_search(sorted_collection: list[int], item: int) -> int | None:
+     1
+     >>> interpolation_search([5, 5, 5, 5, 5], 3) is None
+     True
++
++    A ``key`` maps each element (and the target) to a number; the collection
++    stays ascending under that key:
++
++    >>> interpolation_search([(1, 'a'), (2, 'b'), (3, 'c')], (2, 'b'), key=lambda p: p[0])
++    1
++    >>> interpolation_search([(1, 'a'), (3, 'c')], (2, 'z'), key=lambda p: p[0]) is None
++    True
+     """
++    resolved = resolve_key(key)
++    target = resolved(item)
++    keys = [resolved(value) for value in sorted_collection]
+     left = 0
+     right = len(sorted_collection) - 1
+ 
+     while left <= right:
++        left_value = keys[left]
++        right_value = keys[right]
+         # avoid divided by 0 during interpolation
+-        if sorted_collection[left] == sorted_collection[right]:
+-            if sorted_collection[left] == item:
++        if left_value == right_value:
++            if left_value == target:
+                 return left
+             return None
+ 
+-        point = left + ((item - sorted_collection[left]) * (right - left)) // (
+-            sorted_collection[right] - sorted_collection[left]
++        point = left + ((target - left_value) * (right - left)) // (
++            right_value - left_value
+         )
+ 
+         # out of range check
+         if point < 0 or point >= len(sorted_collection):
+             return None
+ 
+-        current_item = sorted_collection[point]
+-        if current_item == item:
++        current_value = keys[point]
++        if current_value == target:
+             return point
+         if point < left:
+             right = left
+@@ -66,7 +88,7 @@ def interpolation_search(sorted_collection: list[int], item: int) -> int | None:
+         elif point > right:
+             left = right
+             right = point
+-        elif item < current_item:
++        elif target < current_value:
+             right = point - 1
+         else:
+             left = point + 1
+diff --git a/searches/jump_search.py b/searches/jump_search.py
+index 437faf3..2472564 100644
+--- a/searches/jump_search.py
++++ b/searches/jump_search.py
+@@ -10,14 +10,22 @@ https://en.wikipedia.org/wiki/Jump_search
+ 
+ import math
+ from collections.abc import Sequence
+-from typing import Any, Protocol
++from typing import Any, Callable, Protocol
++
++from sorts.comparator import _compare_key_values, _key_values, resolve_key
+ 
+ 
+ class Comparable(Protocol):
+     def __lt__(self, other: Any, /) -> bool: ...
+ 
+ 
+-def jump_search[T: Comparable](arr: Sequence[T], item: T) -> int:
++def jump_search[T: Comparable](
++    arr: Sequence[T],
++    item: T,
++    *,
++    key: Callable[[Any], Any] | None = None,
++    reverse: bool = False,
++) -> int:
+     """
+     Python implementation of the jump search algorithm.
+     Return the index if the `item` is found, otherwise return -1.
+@@ -36,21 +44,30 @@ def jump_search[T: Comparable](arr: Sequence[T], item: T) -> int:
+     """
+ 
+     arr_size = len(arr)
++    if arr_size == 0 and key is not None:
++        return -1
+     block_size = int(math.sqrt(arr_size))
++    keys = _key_values(arr, key)
++    target_key = resolve_key(key)(item)
+ 
+     prev = 0
+     step = block_size
+-    while arr[min(step, arr_size) - 1] < item:
++    while (
++        _compare_key_values(
++            keys[min(step, arr_size) - 1], target_key, reverse=reverse
++        )
++        < 0
++    ):
+         prev = step
+         step += block_size
+         if prev >= arr_size:
+             return -1
+ 
+-    while arr[prev] < item:
++    while _compare_key_values(keys[prev], target_key, reverse=reverse) < 0:
+         prev += 1
+         if prev == min(step, arr_size):
+             return -1
+-    if arr[prev] == item:
++    if _compare_key_values(keys[prev], target_key, reverse=reverse) == 0:
+         return prev
+     return -1
+ 
+diff --git a/sorts/comparator.py b/sorts/comparator.py
+new file mode 100644
+index 0000000..cfe75d2
+--- /dev/null
++++ b/sorts/comparator.py
+@@ -0,0 +1,135 @@
++"""
++A dependency-free comparison core shared by searches, sorts, and strings.
++
++This module provides an opt-in ordering toolkit so that algorithms can order or
++search *by a derived key* (like Python's ``sorted(key=...)``) instead of always
++comparing raw elements. It has no dependencies on any other module and can be
++used independently of the algorithms it powers.
++
++For doctests run the following command:
++python3 -m doctest -v comparator.py
++"""
++
++from __future__ import annotations
++
++from collections.abc import Sequence
++from typing import Any, Callable
++
++
++def _compare_key_values(a: Any, b: Any, *, reverse: bool = False) -> int:
++    """Compare two already-resolved keys without invoking a key function."""
++    result = (a > b) - (a < b)
++    return -result if reverse and result else result
++
++
++def _key_values(
++    collection: Sequence[Any],
++    key: Callable[[Any], Any] | None,
++) -> list[Any]:
++    """Resolve one key per element, preserving positional correspondence."""
++    resolved = resolve_key(key)
++    return [resolved(value) for value in collection]
++
++
++def identity(value: Any) -> Any:
++    """Return ``value`` unchanged.
++
++    This is the default key: comparing by the element itself.
++
++    >>> identity(5)
++    5
++    >>> identity('abc')
++    'abc'
++    >>> obj = object()
++    >>> identity(obj) is obj
++    True
++    """
++    return value
++
++
++def resolve_key(key: Callable[[Any], Any] | None) -> Callable[[Any], Any]:
++    """Resolve an optional key callable to a concrete callable.
++
++    ``None`` means identity; any other callable is returned unchanged.
++
++    >>> resolve_key(None) is identity
++    True
++    >>> resolve_key(len)('abc')
++    3
++    >>> resolve_key(abs)(-4)
++    4
++    """
++    return identity if key is None else key
++
++
++def compare(
++    a: Any,
++    b: Any,
++    *,
++    key: Callable[[Any], Any] | None = None,
++    reverse: bool = False,
++) -> int:
++    """Three-way comparison returning ``-1``, ``0`` or ``1``.
++
++    Consistent with ``<``, ``==`` and ``>`` applied to the resolved keys.
++    With ``key``, ``key(a)`` and ``key(b)`` are compared instead of ``a`` and
++    ``b``. With ``reverse=True`` the sign is flipped for unequal values while
++    ``0`` stays ``0``.
++
++    >>> compare(1, 2)
++    -1
++    >>> compare(2, 2)
++    0
++    >>> compare(3, 2)
++    1
++    >>> compare('aa', 'b', key=len)
++    1
++    >>> compare(1, 2, reverse=True)
++    1
++    >>> compare(2, 2, reverse=True)
++    0
++    """
++    resolved = resolve_key(key)
++    ka = resolved(a)
++    kb = resolved(b)
++    return _compare_key_values(ka, kb, reverse=reverse)
++
++
++def is_sorted(
++    collection: Sequence[Any],
++    *,
++    key: Callable[[Any], Any] | None = None,
++    reverse: bool = False,
++) -> bool:
++    """Return ``True`` when ``collection`` is ordered under the key/reverse rule.
++
++    Ascending means every adjacent pair is non-decreasing; ``reverse=True``
++    means every adjacent pair is non-increasing, both under the resolved key.
++    Empty and single-element collections are considered sorted.
++
++    >>> is_sorted([])
++    True
++    >>> is_sorted([42])
++    True
++    >>> is_sorted([1, 1, 2, 3])
++    True
++    >>> is_sorted([1, 3, 2])
++    False
++    >>> is_sorted([3, 2, 1], reverse=True)
++    True
++    >>> is_sorted(['a', 'bb', 'ccc'], key=len)
++    True
++    >>> is_sorted(['ccc', 'bb', 'a'], key=len, reverse=True)
++    True
++    """
++    keys = _key_values(collection, key)
++    for index in range(len(keys) - 1):
++        if _compare_key_values(keys[index], keys[index + 1], reverse=reverse) > 0:
++            return False
++    return True
++
++
++if __name__ == "__main__":
++    import doctest
++
++    doctest.testmod()
+diff --git a/sorts/heap_sort.py b/sorts/heap_sort.py
+index 44ee1d4..da023d1 100644
+--- a/sorts/heap_sort.py
++++ b/sorts/heap_sort.py
+@@ -2,8 +2,46 @@
+ A pure Python implementation of the heap sort algorithm.
+ """
+ 
++from typing import Any, Callable
+ 
+-def heapify(unsorted: list[int], index: int, heap_size: int) -> None:
++from sorts.comparator import _compare_key_values, _key_values
++
++
++def _heapify(
++    unsorted: list,
++    keys: list[Any],
++    index: int,
++    heap_size: int,
++    *,
++    reverse: bool = False,
++) -> None:
++    largest = index
++    left_index = 2 * index + 1
++    right_index = 2 * index + 2
++    if (
++        left_index < heap_size
++        and _compare_key_values(keys[left_index], keys[largest], reverse=reverse) > 0
++    ):
++        largest = left_index
++    if (
++        right_index < heap_size
++        and _compare_key_values(keys[right_index], keys[largest], reverse=reverse) > 0
++    ):
++        largest = right_index
++    if largest != index:
++        unsorted[largest], unsorted[index] = unsorted[index], unsorted[largest]
++        keys[largest], keys[index] = keys[index], keys[largest]
++        _heapify(unsorted, keys, largest, heap_size, reverse=reverse)
++
++
++def heapify(
++    unsorted: list,
++    index: int,
++    heap_size: int,
++    *,
++    key: Callable[[Any], Any] | None = None,
++    reverse: bool = False,
++) -> None:
+     """
+     :param unsorted: unsorted list containing integers numbers
+     :param index: index
+@@ -17,25 +55,22 @@ def heapify(unsorted: list[int], index: int, heap_size: int) -> None:
+     >>> unsorted
+     [5, 4, 3, 1, 2]
+     """
+-    largest = index
+-    left_index = 2 * index + 1
+-    right_index = 2 * index + 2
+-    if left_index < heap_size and unsorted[left_index] > unsorted[largest]:
+-        largest = left_index
+-
+-    if right_index < heap_size and unsorted[right_index] > unsorted[largest]:
+-        largest = right_index
+-
+-    if largest != index:
+-        unsorted[largest], unsorted[index] = (unsorted[index], unsorted[largest])
+-        heapify(unsorted, largest, heap_size)
++    keys = _key_values(unsorted, key)
++    _heapify(unsorted, keys, index, heap_size, reverse=reverse)
+ 
+ 
+-def heap_sort(unsorted: list[int]) -> list[int]:
++def heap_sort(
++    unsorted: list,
++    *,
++    key: Callable[[Any], Any] | None = None,
++    reverse: bool = False,
++) -> list:
+     """
+     A pure Python implementation of the heap sort algorithm
+ 
+     :param collection: a mutable ordered collection of heterogeneous comparable items
++    :param key: Optional callable mapping each element to a comparison key.
++    :param reverse: When True, order as if sorted descending by key.
+     :return: the same collection ordered by ascending
+ 
+     Examples:
+@@ -49,11 +84,13 @@ def heap_sort(unsorted: list[int]) -> list[int]:
+     [-200, -30, -5, 0, 3, 4, 7, 8, 9, 28, 123]
+     """
+     n = len(unsorted)
++    keys = _key_values(unsorted, key)
+     for i in range(n // 2 - 1, -1, -1):
+-        heapify(unsorted, i, n)
++        _heapify(unsorted, keys, i, n, reverse=reverse)
+     for i in range(n - 1, 0, -1):
+         unsorted[0], unsorted[i] = unsorted[i], unsorted[0]
+-        heapify(unsorted, 0, i)
++        keys[0], keys[i] = keys[i], keys[0]
++        _heapify(unsorted, keys, 0, i, reverse=reverse)
+     return unsorted
+ 
+ 
+diff --git a/sorts/insertion_sort.py b/sorts/insertion_sort.py
+index 2e39be2..1c2796a 100644
+--- a/sorts/insertion_sort.py
++++ b/sorts/insertion_sort.py
+@@ -13,9 +13,11 @@ For manual testing run:
+ python3 insertion_sort.py
+ """
+ 
+-from collections.abc import MutableSequence
++from collections.abc import Callable, MutableSequence
+ from typing import Any, Protocol, TypeVar
+ 
++from sorts.comparator import _compare_key_values, _key_values
++
+ 
+ class Comparable(Protocol):
+     def __lt__(self, other: Any, /) -> bool: ...
+@@ -24,7 +26,12 @@ class Comparable(Protocol):
+ T = TypeVar("T", bound=Comparable)
+ 
+ 
+-def insertion_sort[T: Comparable](collection: MutableSequence[T]) -> MutableSequence[T]:
++def insertion_sort[T: Comparable](
++    collection: MutableSequence[T],
++    *,
++    key: Callable[[Any], Any] | None = None,
++    reverse: bool = False,
++) -> MutableSequence[T]:
+     """A pure Python implementation of the insertion sort algorithm
+ 
+     :param collection: some mutable ordered collection with heterogeneous
+@@ -50,12 +57,24 @@ def insertion_sort[T: Comparable](collection: MutableSequence[T]) -> MutableSequ
+     True
+     """
+ 
++    keys = _key_values(collection, key)
+     for insert_index in range(1, len(collection)):
+         insert_value = collection[insert_index]
+-        while insert_index > 0 and insert_value < collection[insert_index - 1]:
++        insert_key = keys[insert_index]
++        while (
++            insert_index > 0
++            and _compare_key_values(
++                insert_key,
++                keys[insert_index - 1],
++                reverse=reverse,
++            )
++            < 0
++        ):
+             collection[insert_index] = collection[insert_index - 1]
++            keys[insert_index] = keys[insert_index - 1]
+             insert_index -= 1
+         collection[insert_index] = insert_value
++        keys[insert_index] = insert_key
+     return collection
+ 
+ 
+diff --git a/sorts/merge_sort.py b/sorts/merge_sort.py
+index 11c2027..ed0807b 100644
+--- a/sorts/merge_sort.py
++++ b/sorts/merge_sort.py
+@@ -9,12 +9,23 @@ For manual testing run:
+ python merge_sort.py
+ """
+ 
++from typing import Any, Callable
+ 
+-def merge_sort(collection: list) -> list:
++from sorts.comparator import _compare_key_values, resolve_key
++
++
++def merge_sort(
++    collection: list,
++    *,
++    key: Callable[[Any], Any] | None = None,
++    reverse: bool = False,
++) -> list:
+     """
+     Sorts a list using the merge sort algorithm.
+ 
+     :param collection: A mutable ordered collection with comparable items.
++    :param key: Optional callable mapping each element to a comparison key.
++    :param reverse: When True, order as if sorted descending by key.
+     :return: The same collection ordered in ascending order.
+ 
+     Time Complexity: O(n log n)
+@@ -29,7 +40,10 @@ def merge_sort(collection: list) -> list:
+     [-45, -5, -2]
+     """
+ 
+-    def merge(left: list, right: list) -> list:
++    resolved = resolve_key(key)
++    decorated = [(resolved(value), value) for value in collection]
++
++    def merge(left: list[tuple[Any, Any]], right: list[tuple[Any, Any]]) -> list:
+         """
+         Merge two sorted lists into a single sorted list.
+ 
+@@ -39,15 +53,21 @@ def merge_sort(collection: list) -> list:
+         """
+         result = []
+         while left and right:
+-            result.append(left.pop(0) if left[0] <= right[0] else right.pop(0))
++            if _compare_key_values(left[0][0], right[0][0], reverse=reverse) <= 0:
++                result.append(left.pop(0))
++            else:
++                result.append(right.pop(0))
+         result.extend(left)
+         result.extend(right)
+         return result
+ 
+-    if len(collection) <= 1:
+-        return collection
+-    mid_index = len(collection) // 2
+-    return merge(merge_sort(collection[:mid_index]), merge_sort(collection[mid_index:]))
++    def sort(values: list[tuple[Any, Any]]) -> list[tuple[Any, Any]]:
++        if len(values) <= 1:
++            return values
++        mid_index = len(values) // 2
++        return merge(sort(values[:mid_index]), sort(values[mid_index:]))
++
++    return [value for _, value in sort(decorated)]
+ 
+ 
+ if __name__ == "__main__":
+diff --git a/sorts/natural_sort.py b/sorts/natural_sort.py
+index 001ff2c..ade3e98 100644
+--- a/sorts/natural_sort.py
++++ b/sorts/natural_sort.py
+@@ -1,6 +1,6 @@
+ from __future__ import annotations
+ 
+-import re
++from strings.natural_key import natural_sort_key
+ 
+ 
+ def natural_sort(input_list: list[str]) -> list[str]:
+@@ -22,12 +22,18 @@ def natural_sort(input_list: list[str]) -> list[str]:
+     ['Elm11', 'Elm12', 'Elm2', 'elm0', 'elm1', 'elm10', 'elm13', 'elm9']
+     >>> natural_sort(example2)
+     ['elm0', 'elm1', 'Elm2', 'elm9', 'elm10', 'Elm11', 'Elm12', 'elm13']
+-    """
+ 
+-    def alphanum_key(key):
+-        return [int(s) if s.isdigit() else s.lower() for s in re.split("([0-9]+)", key)]
++    The shared natural-ordering key powers the keyed sorts and searches too:
++
++    >>> from sorts.merge_sort import merge_sort
++    >>> from strings.natural_key import natural_sort_key
++    >>> merge_sort(['img10', 'img2', 'img1'], key=natural_sort_key)
++    ['img1', 'img2', 'img10']
++    >>> merge_sort(['img10', 'img2', 'img1'], key=natural_sort_key, reverse=True)
++    ['img10', 'img2', 'img1']
++    """
+ 
+-    return sorted(input_list, key=alphanum_key)
++    return sorted(input_list, key=natural_sort_key)
+ 
+ 
+ if __name__ == "__main__":
+diff --git a/strings/natural_key.py b/strings/natural_key.py
+new file mode 100644
+index 0000000..2018cb1
+--- /dev/null
++++ b/strings/natural_key.py
+@@ -0,0 +1,127 @@
++"""
++Human / natural ordering primitives.
++
++The normal lexicographic ordering of strings puts ``"img10"`` before ``"img2"``
++because it compares code points character by character. Humans expect ``"img2"``
++to come first. This module provides dependency-free primitives to build a total
++ordering key that orders strings the way people expect, usable directly as a
++``key=`` argument for the sorts and searches in this repository (and for the
++built-in ``sorted``).
++
++The chunks produced by :func:`natural_sort_key` are *type-tagged* so that integer
++chunks and text chunks are never compared against each other; this guarantees the
++key never raises ``TypeError`` on mixed inputs such as ``"2a"`` versus ``"a2"``.
++
++For doctests run the following command:
++python3 -m doctest -v natural_key.py
++"""
++
++from __future__ import annotations
++
++import re
++
++_DIGITS = re.compile(r"(\d+)")
++
++
++def natural_chunks(text: str, *, case_sensitive: bool = False) -> list[int | str]:
++    """Split ``text`` into alternating integer and text chunks.
++
++    Runs of digits become ``int`` chunks; everything else stays as ``str``.
++    Text chunks are lower-cased unless ``case_sensitive`` is ``True``. Empty
++    fragments (which ``re.split`` produces at the boundaries) are dropped.
++
++    >>> natural_chunks('img10.png')
++    ['img', 10, '.png']
++    >>> natural_chunks('img2')
++    ['img', 2]
++    >>> natural_chunks('100')
++    [100]
++    >>> natural_chunks('')
++    []
++    >>> natural_chunks('IMG2')
++    ['img', 2]
++    >>> natural_chunks('IMG2', case_sensitive=True)
++    ['IMG', 2]
++    """
++    chunks: list[int | str] = []
++    for fragment in _DIGITS.split(text):
++        if fragment == "":
++            continue
++        if fragment.isdigit():
++            chunks.append(int(fragment))
++        else:
++            chunks.append(fragment if case_sensitive else fragment.lower())
++    return chunks
++
++
++def natural_sort_key(
++    text: str, *, case_sensitive: bool = False
++) -> tuple[tuple[int, int | str], ...]:
++    """Build a total-ordering sort key for natural (human) ordering.
++
++    Each chunk is wrapped as ``(0, int)`` for digit runs and ``(1, str)`` for
++    text runs. Because the leading tag differs, an integer chunk and a text
++    chunk are never compared directly, so the key never raises ``TypeError``.
++
++    Case-insensitive by default; pass ``case_sensitive=True`` to keep case.
++
++    >>> natural_sort_key('img2')
++    ((1, 'img'), (0, 2))
++    >>> natural_sort_key('')
++    ()
++    >>> sorted(['img10', 'img2', 'img1'], key=natural_sort_key)
++    ['img1', 'img2', 'img10']
++    >>> natural_sort_key('IMG2') == natural_sort_key('img2')
++    True
++    >>> natural_sort_key('IMG2', case_sensitive=True) == natural_sort_key('img2', case_sensitive=True)
++    False
++    >>> natural_sort_key('2a') < natural_sort_key('a2')  # never raises on mixed chunks
++    True
++    """
++    key: list[tuple[int, int | str]] = []
++    for chunk in natural_chunks(text, case_sensitive=case_sensitive):
++        if isinstance(chunk, int):
++            key.append((0, chunk))
++        else:
++            key.append((1, chunk))
++    return tuple(key)
++
++
++def natural_compare(a: str, b: str, *, case_sensitive: bool = False) -> int:
++    """Three-way natural comparison returning ``-1``, ``0`` or ``1``.
++
++    >>> natural_compare('img2', 'img10')
++    -1
++    >>> natural_compare('img10', 'img2')
++    1
++    >>> natural_compare('img2', 'img2')
++    0
++    >>> natural_compare('img2', 'IMG2')
++    0
++    >>> natural_compare('img2', 'IMG2', case_sensitive=True)
++    1
++    """
++    ka = natural_sort_key(a, case_sensitive=case_sensitive)
++    kb = natural_sort_key(b, case_sensitive=case_sensitive)
++    return (ka > kb) - (ka < kb)
++
++
++def _natural_sort_demo() -> None:
++    """Cross-module integration: natural ordering drives ``merge_sort``.
++
++    ``natural_sort_key`` plugs straight into the keyed sorts, and equal-under-key
++    inputs keep their input order thanks to merge sort's stability.
++
++    >>> from sorts.merge_sort import merge_sort
++    >>> files = ['img10.png', 'img2.png', 'img1.png', 'img2.png']
++    >>> merge_sort(files, key=natural_sort_key)
++    ['img1.png', 'img2.png', 'img2.png', 'img10.png']
++    >>> merge_sort(files, key=natural_sort_key, reverse=True)
++    ['img10.png', 'img2.png', 'img2.png', 'img1.png']
++    """
++
++
++if __name__ == "__main__":
++    import doctest
++
++    doctest.testmod()

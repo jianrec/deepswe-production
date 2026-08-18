@@ -1,0 +1,688 @@
+diff --git a/packages/react/src/__tests__/ReactChildKeyPath-hidden-test.js b/packages/react/src/__tests__/ReactChildKeyPath-hidden-test.js
+new file mode 100644
+index 0000000..4a64068
+--- /dev/null
++++ b/packages/react/src/__tests__/ReactChildKeyPath-hidden-test.js
+@@ -0,0 +1,44 @@
++'use strict';
++
++let React;
++let KeyPath;
++
++beforeEach(() => {
++  jest.resetModules();
++  React = require('react');
++  KeyPath = require('shared/ReactChildKeyPath');
++});
++
++it('key path module exports traversal separators', () => {
++  expect(KeyPath.SEPARATOR).toBe('.');
++  expect(KeyPath.SUBSEPARATOR).toBe(':');
++});
++
++it('getElementKey returns base36 positional keys', () => {
++  expect(KeyPath.getElementKey('leaf', 0)).toBe('0');
++  expect(KeyPath.getElementKey('leaf', 35)).toBe('z');
++  expect(KeyPath.getElementKey('leaf', 36)).toBe('10');
++});
++
++it('getElementKey escapes explicit element keys', () => {
++  const element = React.createElement('div', {key: 'a:b=c'});
++  expect(KeyPath.getElementKey(element, 9)).toBe('$a=2b=0c');
++});
++
++it('getElementKey prefers an explicit key over its position', () => {
++  const element = React.createElement('div', {key: 'fixed'});
++  expect(KeyPath.getElementKey(element, 0)).toBe('$fixed');
++  expect(KeyPath.getElementKey(element, 100)).toBe('$fixed');
++});
++
++it('escapeUserProvidedKey doubles every slash run', () => {
++  expect(KeyPath.escapeUserProvidedKey('a/b//c')).toBe('a//b///c');
++});
++
++it('shared getElementKey agrees with public traversal keys', () => {
++  const element = React.createElement('div', {key: 'shared:key'});
++  const result = React.Children.toKeyedArray([element]);
++  expect(result[0].key).toBe(
++    KeyPath.SEPARATOR + KeyPath.getElementKey(element, 0),
++  );
++});
+diff --git a/packages/react/src/__tests__/ReactChildrenExports-hidden-test.js b/packages/react/src/__tests__/ReactChildrenExports-hidden-test.js
+new file mode 100644
+index 0000000..2860e9e
+--- /dev/null
++++ b/packages/react/src/__tests__/ReactChildrenExports-hidden-test.js
+@@ -0,0 +1,61 @@
++'use strict';
++
++beforeEach(() => {
++  jest.resetModules();
++});
++
++it('public React Children namespace exposes all four utilities', () => {
++  const React = require('react');
++  expect(typeof React.Children.reduce).toBe('function');
++  expect(typeof React.Children.filter).toBe('function');
++  expect(typeof React.Children.find).toBe('function');
++  expect(typeof React.Children.toKeyedArray).toBe('function');
++});
++
++it('ReactChildren module provides the contracted named exports', () => {
++  const ReactChildren = require('../ReactChildren');
++  expect(typeof ReactChildren.reduceChildren).toBe('function');
++  expect(typeof ReactChildren.filterChildren).toBe('function');
++  expect(typeof ReactChildren.findChild).toBe('function');
++  expect(typeof ReactChildren.toKeyedArray).toBe('function');
++});
++
++it('ReactClient aggregates the new Children utilities', () => {
++  const {Children} = require('../ReactClient');
++  expect(typeof Children.reduce).toBe('function');
++  expect(typeof Children.filter).toBe('function');
++  expect(typeof Children.find).toBe('function');
++  expect(typeof Children.toKeyedArray).toBe('function');
++});
++
++it('ReactServer aggregates the new Children utilities', () => {
++  const {Children} = require('../ReactServer');
++  expect(typeof Children.reduce).toBe('function');
++  expect(typeof Children.filter).toBe('function');
++  expect(typeof Children.find).toBe('function');
++  expect(typeof Children.toKeyedArray).toBe('function');
++});
++
++it('Children namespace contains existing and contracted utility names only', () => {
++  const {Children} = require('../ReactClient');
++  expect(Object.keys(Children).sort()).toEqual([
++    'count',
++    'filter',
++    'find',
++    'forEach',
++    'map',
++    'only',
++    'reduce',
++    'toArray',
++    'toKeyedArray',
++  ]);
++});
++
++it('package entry does not expose child utilities as top-level exports', () => {
++  const React = require('react');
++  expect(React.reduceChildren).toBeUndefined();
++  expect(React.filterChildren).toBeUndefined();
++  expect(React.findChild).toBeUndefined();
++  expect(React.toKeyedArray).toBeUndefined();
++  expect(typeof React.Children.toKeyedArray).toBe('function');
++});
+diff --git a/packages/react/src/__tests__/ReactChildrenFilter-hidden-test.js b/packages/react/src/__tests__/ReactChildrenFilter-hidden-test.js
+new file mode 100644
+index 0000000..d900d92
+--- /dev/null
++++ b/packages/react/src/__tests__/ReactChildrenFilter-hidden-test.js
+@@ -0,0 +1,86 @@
++'use strict';
++
++let React;
++
++beforeEach(() => {
++  jest.resetModules();
++  React = require('react');
++});
++
++it('filter selects primitive children into a flat array', () => {
++  expect(
++    React.Children.filter([1, [2, 3], 4], child => child % 2 === 0),
++  ).toEqual([2, 4]);
++});
++
++it('filter passes flattened indexes to its predicate', () => {
++  const calls = [];
++  React.Children.filter(['a', ['b', 'c']], (child, index) => {
++    calls.push([child, index]);
++    return true;
++  });
++  expect(calls).toEqual([
++    ['a', 0],
++    ['b', 1],
++    ['c', 2],
++  ]);
++});
++
++it('filter binds the optional predicate context', () => {
++  const context = {minimum: 3};
++  const result = React.Children.filter(
++    [1, 3, 5],
++    function (child) {
++      expect(this).toBe(context);
++      return child >= this.minimum;
++    },
++    context,
++  );
++  expect(result).toEqual([3, 5]);
++});
++
++it('filter rekeys surviving elements exactly like toArray', () => {
++  const children = [
++    React.createElement('span', {key: 'drop'}, 'drop'),
++    [React.createElement('span', null, 'keep')],
++    React.createElement('span', {key: 'also'}, 'also'),
++  ];
++  const flattened = React.Children.toArray(children);
++  const filtered = React.Children.filter(
++    children,
++    child => child.props.children !== 'drop',
++  );
++  expect(filtered.map(child => child.key)).toEqual([
++    flattened[1].key,
++    flattened[2].key,
++  ]);
++});
++
++it('filter leaves surviving strings and numbers unchanged', () => {
++  const text = 'text';
++  const result = React.Children.filter([text, 0, 2], () => true);
++  expect(result).toEqual(['text', 0, 2]);
++  expect(result[0]).toBe(text);
++  expect(typeof result[1]).toBe('number');
++});
++
++it('filter skips empty child values without invoking predicate', () => {
++  const visited = [];
++  const result = React.Children.filter(
++    [null, false, undefined, true, 'kept'],
++    child => {
++      visited.push(child);
++      return true;
++    },
++  );
++  expect(result).toEqual(['kept']);
++  expect(visited).toEqual(['kept']);
++});
++
++it('filter returns a new empty array when no child survives', () => {
++  const first = React.Children.filter([1, 2], () => false);
++  const second = React.Children.filter([1, 2], () => false);
++  expect(first).toEqual([]);
++  expect(second).toEqual([]);
++  expect(first).not.toBe(second);
++});
+diff --git a/packages/react/src/__tests__/ReactChildrenFind-hidden-test.js b/packages/react/src/__tests__/ReactChildrenFind-hidden-test.js
+new file mode 100644
+index 0000000..6a9b321
+--- /dev/null
++++ b/packages/react/src/__tests__/ReactChildrenFind-hidden-test.js
+@@ -0,0 +1,89 @@
++'use strict';
++
++let React;
++
++beforeEach(() => {
++  jest.resetModules();
++  React = require('react');
++});
++
++it('find returns the first matching primitive child', () => {
++  expect(React.Children.find([1, 4, 6], child => child % 2 === 0)).toBe(4);
++});
++
++it('find returns undefined when no child matches', () => {
++  expect(
++    React.Children.find(['a', 'b'], child => child === 'z'),
++  ).toBeUndefined();
++});
++
++it('find stops pulling an iterable immediately after a match', () => {
++  const pulled = [];
++  const iterable = {
++    [Symbol.iterator]() {
++      let index = 0;
++      return {
++        next() {
++          pulled.push(index);
++          return index < 5
++            ? {value: index++, done: false}
++            : {value: undefined, done: true};
++        },
++      };
++    },
++  };
++  expect(React.Children.find(iterable, child => child === 1)).toBe(1);
++  expect(pulled).toEqual([0, 1]);
++});
++
++it('find returns the original unrekeyed element', () => {
++  const target = React.createElement('div', {key: 'target'});
++  const found = React.Children.find(
++    [React.createElement('i'), target],
++    child => child === target,
++  );
++  expect(found).toBe(target);
++  expect(found.key).toBe('target');
++});
++
++it('find binds predicate context and supplies indexes', () => {
++  const context = {wanted: 2};
++  const calls = [];
++  const found = React.Children.find(
++    [0, [1, 2]],
++    function (child, index) {
++      expect(this).toBe(context);
++      calls.push(index);
++      return child === this.wanted;
++    },
++    context,
++  );
++  expect(found).toBe(2);
++  expect(calls).toEqual([0, 1, 2]);
++});
++
++it('find ignores null undefined and booleans', () => {
++  const visited = [];
++  const found = React.Children.find(
++    [null, true, undefined, false, 'match'],
++    child => {
++      visited.push(child);
++      return true;
++    },
++  );
++  expect(found).toBe('match');
++  expect(visited).toEqual(['match']);
++});
++
++it('find does not visit nested siblings after a nested match', () => {
++  const visited = [];
++  const found = React.Children.find(
++    ['before', ['target', 'nested-after'], 'outer-after'],
++    child => {
++      visited.push(child);
++      return child === 'target';
++    },
++  );
++  expect(found).toBe('target');
++  expect(visited).toEqual(['before', 'target']);
++});
+diff --git a/packages/react/src/__tests__/ReactChildrenFunctionalTraversal-hidden-test.js b/packages/react/src/__tests__/ReactChildrenFunctionalTraversal-hidden-test.js
+new file mode 100644
+index 0000000..cda5bc2
+--- /dev/null
++++ b/packages/react/src/__tests__/ReactChildrenFunctionalTraversal-hidden-test.js
+@@ -0,0 +1,102 @@
++'use strict';
++
++let React;
++
++beforeEach(() => {
++  jest.resetModules();
++  React = require('react');
++});
++
++it('all functional utilities flatten nested arrays consistently', () => {
++  const children = ['a', [['b']], 'c'];
++  expect(
++    React.Children.reduce(
++      children,
++      (items, child) => items.concat(child),
++      [],
++    ),
++  ).toEqual(['a', 'b', 'c']);
++  expect(React.Children.filter(children, () => true)).toEqual([
++    'a',
++    'b',
++    'c',
++  ]);
++  expect(React.Children.find(children, child => child === 'b')).toBe('b');
++  expect(
++    React.Children.toKeyedArray(children).map(item => item.node),
++  ).toEqual(['a', 'b', 'c']);
++});
++
++it('all functional utilities handle a single numeric child', () => {
++  expect(React.Children.reduce(9, (sum, child) => sum + child, 1)).toBe(10);
++  expect(React.Children.filter(9, () => true)).toEqual([9]);
++  expect(React.Children.find(9, () => true)).toBe(9);
++  expect(React.Children.toKeyedArray(9)).toEqual([{key: '.0', node: 9}]);
++});
++
++it('all functional utilities produce empty results for null children', () => {
++  expect(React.Children.reduce(null, count => count + 1, 0)).toBe(0);
++  expect(React.Children.filter(null, () => true)).toEqual([]);
++  expect(React.Children.find(null, () => true)).toBeUndefined();
++  expect(React.Children.toKeyedArray(null)).toEqual([]);
++});
++
++it('callback indexes agree across reduce filter and find', () => {
++  const children = ['x', ['y', 'z']];
++  const reduceIndexes = [];
++  const filterIndexes = [];
++  const findIndexes = [];
++  React.Children.reduce(
++    children,
++    (value, child, index) => {
++      reduceIndexes.push(index);
++      return value;
++    },
++    null,
++  );
++  React.Children.filter(children, (child, index) => {
++    filterIndexes.push(index);
++    return true;
++  });
++  React.Children.find(children, (child, index) => {
++    findIndexes.push(index);
++    return false;
++  });
++  expect(reduceIndexes).toEqual([0, 1, 2]);
++  expect(filterIndexes).toEqual(reduceIndexes);
++  expect(findIndexes).toEqual(reduceIndexes);
++});
++
++it('new callback indexes match forEach over non-empty leaves', () => {
++  const children = ['x', ['y'], 3];
++  const expected = [];
++  const actual = [];
++  React.Children.forEach(children, (child, index) => {
++    expected.push([child, index]);
++  });
++  React.Children.reduce(
++    children,
++    (value, child, index) => {
++      actual.push([child, index]);
++      return value;
++    },
++    null,
++  );
++  expect(actual).toEqual(expected);
++});
++
++it('filter and toKeyedArray agree with toArray element keying', () => {
++  const children = [
++    React.createElement('div', {key: 'one'}),
++    [React.createElement('span')],
++  ];
++  const expected = React.Children.toArray(children);
++  const filtered = React.Children.filter(children, () => true);
++  const keyed = React.Children.toKeyedArray(children);
++  expect(filtered.map(child => child.key)).toEqual(
++    expected.map(child => child.key),
++  );
++  expect(keyed.map(item => item.node.key)).toEqual(
++    expected.map(child => child.key),
++  );
++});
+diff --git a/packages/react/src/__tests__/ReactChildrenInvalidInputs-hidden-test.js b/packages/react/src/__tests__/ReactChildrenInvalidInputs-hidden-test.js
+new file mode 100644
+index 0000000..c4d6be2
+--- /dev/null
++++ b/packages/react/src/__tests__/ReactChildrenInvalidInputs-hidden-test.js
+@@ -0,0 +1,100 @@
++'use strict';
++
++let React;
++
++beforeEach(() => {
++  jest.resetModules();
++  React = require('react');
++});
++
++function captureTraversal(run) {
++  const errors = [];
++  const warnings = [];
++  const originalError = console.error;
++  const originalWarn = console.warn;
++  console.error = (...args) => errors.push(args);
++  console.warn = (...args) => warnings.push(args);
++  let thrown;
++  try {
++    run();
++  } catch (error) {
++    thrown = error;
++  } finally {
++    console.error = originalError;
++    console.warn = originalWarn;
++  }
++  return {errors, warnings, thrown};
++}
++
++it('reduce follows the existing invalid plain-object path', () => {
++  const child = {invalid: true};
++  const baseline = captureTraversal(() =>
++    React.Children.forEach(child, () => {}),
++  );
++  const result = captureTraversal(() =>
++    React.Children.reduce(child, value => value, 0),
++  );
++  expect(Boolean(result.thrown)).toBe(Boolean(baseline.thrown));
++  expect(result.thrown && result.thrown.message).toBe(
++    baseline.thrown && baseline.thrown.message,
++  );
++  expect(result.errors).toEqual(baseline.errors);
++  expect(result.warnings).toEqual(baseline.warnings);
++});
++
++it('filter follows the existing invalid function-child path', () => {
++  const child = function InvalidChild() {};
++  const baseline = captureTraversal(() =>
++    React.Children.forEach(child, () => {}),
++  );
++  const result = captureTraversal(() =>
++    React.Children.filter(child, () => true),
++  );
++  expect(Boolean(result.thrown)).toBe(Boolean(baseline.thrown));
++  expect(result.errors).toEqual(baseline.errors);
++  expect(result.warnings).toEqual(baseline.warnings);
++});
++
++it('find preserves invalid plain-object diagnostics', () => {
++  const child = {first: 1, second: 2};
++  const baseline = captureTraversal(() => React.Children.toArray(child));
++  const result = captureTraversal(() =>
++    React.Children.find(child, () => false),
++  );
++  expect(Boolean(result.thrown)).toBe(Boolean(baseline.thrown));
++  expect(result.thrown && result.thrown.message).toBe(
++    baseline.thrown && baseline.thrown.message,
++  );
++  expect(result.errors).toEqual(baseline.errors);
++  expect(result.warnings).toEqual(baseline.warnings);
++});
++
++it('toKeyedArray preserves invalid plain-object diagnostics', () => {
++  const child = {first: 1, second: 2};
++  const baseline = captureTraversal(() => React.Children.toArray(child));
++  const result = captureTraversal(() =>
++    React.Children.toKeyedArray(child),
++  );
++  expect(Boolean(result.thrown)).toBe(Boolean(baseline.thrown));
++  expect(result.thrown && result.thrown.message).toBe(
++    baseline.thrown && baseline.thrown.message,
++  );
++  expect(result.errors).toEqual(baseline.errors);
++  expect(result.warnings).toEqual(baseline.warnings);
++});
++
++it('new utilities do not invoke callbacks for a function child', () => {
++  const child = function FunctionChild() {};
++  const reduceCallback = jest.fn();
++  const filterCallback = jest.fn();
++  const findCallback = jest.fn();
++  expect(React.Children.reduce(child, reduceCallback, 'initial')).toBe(
++    'initial',
++  );
++  expect(React.Children.filter(child, filterCallback)).toEqual([]);
++  expect(React.Children.find(child, findCallback)).toBeUndefined();
++  expect(React.Children.toKeyedArray(child)).toEqual([]);
++  expect(reduceCallback).not.toHaveBeenCalled();
++  expect(filterCallback).not.toHaveBeenCalled();
++  expect(findCallback).not.toHaveBeenCalled();
++});
+diff --git a/packages/react/src/__tests__/ReactChildrenReduce-hidden-test.js b/packages/react/src/__tests__/ReactChildrenReduce-hidden-test.js
+new file mode 100644
+index 0000000..17ee2eb
+--- /dev/null
++++ b/packages/react/src/__tests__/ReactChildrenReduce-hidden-test.js
+@@ -0,0 +1,94 @@
++'use strict';
++
++let React;
++
++beforeEach(() => {
++  jest.resetModules();
++  React = require('react');
++});
++
++it('reduce folds primitive children in traversal order', () => {
++  const result = React.Children.reduce(
++    [1, 2, 3],
++    (sum, child) => sum + child,
++    4,
++  );
++  expect(result).toBe(10);
++});
++
++it('reduce passes a running flattened index', () => {
++  const calls = [];
++  React.Children.reduce(
++    ['a', ['b', ['c']], 'd'],
++    (value, child, index) => {
++      calls.push([child, index]);
++      return value;
++    },
++    null,
++  );
++  expect(calls).toEqual([
++    ['a', 0],
++    ['b', 1],
++    ['c', 2],
++    ['d', 3],
++  ]);
++});
++
++it('reduce returns the identical initial value for empty children', () => {
++  const initial = {stable: true};
++  expect(React.Children.reduce([], () => null, initial)).toBe(initial);
++});
++
++it('reduce skips null undefined and boolean children', () => {
++  const calls = [];
++  const result = React.Children.reduce(
++    [null, undefined, false, true, 'value', 7],
++    (items, child, index) => {
++      calls.push([child, index]);
++      items.push(child);
++      return items;
++    },
++    [],
++  );
++  expect(result).toEqual(['value', 7]);
++  expect(calls).toEqual([
++    ['value', 0],
++    [7, 1],
++  ]);
++});
++
++it('reduce traverses a single non-array child once', () => {
++  const calls = [];
++  const result = React.Children.reduce(
++    'single',
++    (value, child, index) => {
++      calls.push([child, index]);
++      return value + child;
++    },
++    '',
++  );
++  expect(result).toBe('single');
++  expect(calls).toEqual([['single', 0]]);
++});
++
++it('reduce traverses iterable children in iterator order', () => {
++  const iterable = new Set(['first', 'second', 'third']);
++  const result = React.Children.reduce(
++    iterable,
++    (value, child) => value + child[0],
++    '',
++  );
++  expect(result).toBe('fst');
++});
++
++it('reduce supports accumulator type changes returned by the reducer', () => {
++  const result = React.Children.reduce(
++    ['a', 'bb', 'ccc'],
++    (accumulator, child, index) => ({
++      total: accumulator.total + child.length,
++      lastIndex: index,
++    }),
++    {total: 0, lastIndex: -1},
++  );
++  expect(result).toEqual({total: 6, lastIndex: 2});
++});
+diff --git a/packages/react/src/__tests__/ReactChildrenToKeyedArray-hidden-test.js b/packages/react/src/__tests__/ReactChildrenToKeyedArray-hidden-test.js
+new file mode 100644
+index 0000000..e2c94bb
+--- /dev/null
++++ b/packages/react/src/__tests__/ReactChildrenToKeyedArray-hidden-test.js
+@@ -0,0 +1,64 @@
++'use strict';
++
++let React;
++
++beforeEach(() => {
++  jest.resetModules();
++  React = require('react');
++});
++
++it('toKeyedArray assigns positional top-level keys', () => {
++  expect(React.Children.toKeyedArray(['a', 'b'])).toEqual([
++    {key: '.0', node: 'a'},
++    {key: '.1', node: 'b'},
++  ]);
++});
++
++it('toKeyedArray joins nested array paths with subseparators', () => {
++  const result = React.Children.toKeyedArray(['a', ['b', 'c']]);
++  expect(result.map(item => item.key)).toEqual(['.0', '.1:0', '.1:1']);
++});
++
++it('toKeyedArray retains every nested level in the key path', () => {
++  const result = React.Children.toKeyedArray([[['deep']]]);
++  expect(result).toEqual([{key: '.0:0:0', node: 'deep'}]);
++});
++
++it('toKeyedArray uses escaped user element keys', () => {
++  const element = React.createElement('div', {key: 'a:b=c'});
++  const result = React.Children.toKeyedArray([element]);
++  expect(result[0].key).toBe('.$a=2b=0c');
++});
++
++it('toKeyedArray uses base36 positional keys', () => {
++  const children = Array.from({length: 37}, (_, index) => String(index));
++  const result = React.Children.toKeyedArray(children);
++  expect(result[35].key).toBe('.z');
++  expect(result[36].key).toBe('.10');
++});
++
++it('toKeyedArray element nodes carry the keys used by toArray', () => {
++  const children = [
++    React.createElement('i'),
++    [React.createElement('b', {key: 'bold'})],
++  ];
++  const keyed = React.Children.toKeyedArray(children);
++  const array = React.Children.toArray(children);
++  expect(keyed.map(item => item.node.key)).toEqual(
++    array.map(node => node.key),
++  );
++  expect(keyed.map(item => item.key)).toEqual(array.map(node => node.key));
++});
++
++it('toKeyedArray preserves primitive nodes unchanged', () => {
++  expect(
++    React.Children.toKeyedArray(['text', 12]).map(item => item.node),
++  ).toEqual(['text', 12]);
++});
++
++it('toKeyedArray flattens iterables and preserves positional gaps', () => {
++  const children = new Set([null, 'value', false, 8]);
++  const result = React.Children.toKeyedArray(children);
++  expect(result.map(item => item.node)).toEqual(['value', 8]);
++  expect(result.map(item => item.key)).toEqual(['.1', '.3']);
++});

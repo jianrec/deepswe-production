@@ -1,0 +1,30 @@
+# Credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Runtime state and large transient assets
+tasks/
+workspaces/
+logs/
+registry/*.jsonl
+registry/*.lock
+registry/*.tmp
+harbor-jobs/
+
+# Python / editor / OS
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.DS_Store
+.idea/
+.vscode/
+
+# Temporary files
+*.tmp
+*.bak
+*.swp

@@ -1,0 +1,869 @@
+diff --git a/src/algorithms/cryptography/alphabet/AlphabetCodec.js b/src/algorithms/cryptography/alphabet/AlphabetCodec.js
+new file mode 100644
+index 0000000..23053a0
+--- /dev/null
++++ b/src/algorithms/cryptography/alphabet/AlphabetCodec.js
+@@ -0,0 +1,142 @@
++/**
++ * AlphabetCodec centralizes alphabet validation and the conversion between
++ * symbols and their numeric indices for classical ciphers.
++ *
++ * It owns:
++ *   - validation of a non-empty alphabet with unique symbols,
++ *   - conversion of symbols to numeric indices (`encode`, `indexOf`),
++ *   - reconstruction of symbols from indices while preserving the configured
++ *     case (`decode`, `symbolAt`),
++ *   - a case policy (case-sensitive matching or case-insensitive matching that
++ *     always reconstructs symbols using the alphabet's own case),
++ *   - an unknown-symbol policy that either preserves characters outside the
++ *     alphabet (pass-through) or rejects them with an explicit error.
++ *
++ * The codec is deterministic and never mutates its inputs.
++ */
++export default class AlphabetCodec {
++  /**
++   * @param {string|string[]} alphabet - Ordered collection of unique symbols.
++   * @param {object} [options]
++   * @param {boolean} [options.caseSensitive=true] - When false, symbol matching
++   *   ignores case and reconstructed symbols always use the alphabet's own case.
++   * @param {boolean} [options.preserveUnknown=false] - When true, characters
++   *   outside the alphabet are passed through unchanged; when false, they are
++   *   rejected with an explicit error.
++   */
++  constructor(alphabet, options = {}) {
++    const symbols = typeof alphabet === 'string' ? alphabet.split('') : alphabet;
++
++    if (!Array.isArray(symbols) || symbols.length === 0) {
++      throw new Error('Alphabet must be a non-empty string or array of symbols');
++    }
++
++    if (symbols.some((symbol) => typeof symbol !== 'string' || symbol.length !== 1)) {
++      throw new Error('Alphabet must only contain single-character symbols');
++    }
++
++    const { caseSensitive = true, preserveUnknown = false } = options;
++
++    // Build the index lookup, honoring the case policy, and validate uniqueness.
++    const lookup = new Map();
++    symbols.forEach((symbol, index) => {
++      const key = caseSensitive ? symbol : symbol.toLowerCase();
++      if (lookup.has(key)) {
++        throw new Error('Alphabet symbols must be unique');
++      }
++      lookup.set(key, index);
++    });
++
++    this.symbols = [...symbols];
++    this.size = this.symbols.length;
++    this.caseSensitive = caseSensitive;
++    this.preserveUnknown = preserveUnknown;
++    this.lookup = lookup;
++  }
++
++  /**
++   * Returns the index of a symbol within the alphabet, or -1 when the symbol is
++   * not part of the alphabet. Honors the configured case policy.
++   *
++   * @param {string} symbol
++   * @return {number}
++   */
++  indexOf(symbol) {
++    if (typeof symbol !== 'string' || symbol.length !== 1) {
++      return -1;
++    }
++    const key = this.caseSensitive ? symbol : symbol.toLowerCase();
++    return this.lookup.has(key) ? this.lookup.get(key) : -1;
++  }
++
++  /**
++   * Reconstructs the symbol located at a given index. The index is normalized
++   * into [0, size) so callers may pass residues from modular arithmetic. The
++   * returned symbol always preserves the alphabet's configured case.
++   *
++   * @param {number} index
++   * @return {string}
++   * @throws {Error}
++   */
++  symbolAt(index) {
++    if (typeof index !== 'number' || !Number.isInteger(index)) {
++      throw new Error('Symbol index must be an integer');
++    }
++    const normalized = ((index % this.size) + this.size) % this.size;
++    return this.symbols[normalized];
++  }
++
++  /**
++   * Encodes a piece of text into an array of tokens. In-alphabet symbols become
++   * their numeric indices. Out-of-alphabet characters are either passed through
++   * unchanged (as strings) or rejected, depending on the unknown-symbol policy.
++   *
++   * @param {string} text
++   * @return {Array<number|string>}
++   * @throws {Error}
++   */
++  encode(text) {
++    if (typeof text !== 'string') {
++      throw new Error('Text to encode must be a string');
++    }
++    return text.split('').map((character) => {
++      const index = this.indexOf(character);
++      if (index !== -1) {
++        return index;
++      }
++      if (this.preserveUnknown) {
++        return character;
++      }
++      throw new Error(`Symbol "${character}" is not part of the alphabet`);
++    });
++  }
++
++  /**
++   * Decodes an array of tokens back into a string. Numeric tokens are converted
++   * into symbols; string tokens (previously preserved characters) are passed
++   * through unchanged.
++   *
++   * @param {Array<number|string>} indices
++   * @return {string}
++   * @throws {Error}
++   */
++  decode(indices) {
++    if (!Array.isArray(indices)) {
++      throw new Error('Indices to decode must be an array');
++    }
++    return indices
++      .map((token) => {
++        if (typeof token === 'number') {
++          return this.symbolAt(token);
++        }
++        if (typeof token === 'string') {
++          if (!this.preserveUnknown && this.indexOf(token) === -1) {
++            throw new Error(`Symbol "${token}" is not part of the alphabet`);
++          }
++          return token;
++        }
++        throw new Error('Each token must be a number or a string');
++      })
++      .join('');
++  }
++}
+diff --git a/src/algorithms/cryptography/caesar-cipher/caesarCipher.js b/src/algorithms/cryptography/caesar-cipher/caesarCipher.js
+index ba92299..0f376e1 100644
+--- a/src/algorithms/cryptography/caesar-cipher/caesarCipher.js
++++ b/src/algorithms/cryptography/caesar-cipher/caesarCipher.js
+@@ -1,28 +1,35 @@
++import AlphabetCodec from '../alphabet/AlphabetCodec';
++import { mod } from '../../math/modular-arithmetic/modularArithmetic';
++
+ // Create alphabet array: ['a', 'b', 'c', ..., 'z'].
+ const englishAlphabet = 'abcdefghijklmnopqrstuvwxyz'.split('');
+ 
+ /**
+- * Generates a cipher map out of the alphabet.
+- * Example with a shift 3: {'a': 'd', 'b': 'e', 'c': 'f', ...}
++ * Applies a Caesar shift to a string using the shared alphabet codec.
++ *
++ * The shift is normalized so that arbitrarily large positive or negative
++ * shifts behave cyclically. Matching is case-insensitive and characters that
++ * are not part of the alphabet are passed through unchanged, preserving the
++ * historic default of lowercase output and pass-through behavior.
+  *
+- * @param {string[]} alphabet - i.e. ['a', 'b', 'c', ... , 'z']
+- * @param {number} shift - i.e. 3
+- * @return {Object} - i.e. {'a': 'd', 'b': 'e', 'c': 'f', ..., 'z': 'c'}
++ * @param {string} str
++ * @param {number} shift
++ * @param {string[]|string} alphabet
++ * @return {string}
+  */
+-const getCipherMap = (alphabet, shift) => {
+-  return alphabet
+-    .reduce((charsMap, currentChar, charIndex) => {
+-      const charsMapClone = { ...charsMap };
+-      // Making the shift to be cyclic (i.e. with a shift of 1 - 'z' would be mapped to 'a').
+-      let encryptedCharIndex = (charIndex + shift) % alphabet.length;
+-      // Support negative shifts for creating a map for decryption
+-      // (i.e. with shift -1 - 'a' would be mapped to 'z').
+-      if (encryptedCharIndex < 0) {
+-        encryptedCharIndex += alphabet.length;
+-      }
+-      charsMapClone[currentChar] = alphabet[encryptedCharIndex];
+-      return charsMapClone;
+-    }, {});
++const applyShift = (str, shift, alphabet) => {
++  const codec = new AlphabetCodec(alphabet, {
++    caseSensitive: false,
++    preserveUnknown: true,
++  });
++
++  // Normalize the shift into [0, size) so huge/negative shifts stay cyclic.
++  const normalizedShift = mod(shift, codec.size);
++
++  const shifted = codec.encode(str)
++    .map((token) => (typeof token === 'number' ? token + normalizedShift : token));
++
++  return codec.decode(shifted);
+ };
+ 
+ /**
+@@ -32,13 +39,7 @@ const getCipherMap = (alphabet, shift) => {
+  * @return {string}
+  */
+ export const caesarCipherEncrypt = (str, shift, alphabet = englishAlphabet) => {
+-  // Create a cipher map:
+-  const cipherMap = getCipherMap(alphabet, shift);
+-  return str
+-    .toLowerCase()
+-    .split('')
+-    .map((char) => cipherMap[char] || char)
+-    .join('');
++  return applyShift(str, shift, alphabet);
+ };
+ 
+ /**
+@@ -48,11 +49,5 @@ export const caesarCipherEncrypt = (str, shift, alphabet = englishAlphabet) => {
+  * @return {string}
+  */
+ export const caesarCipherDecrypt = (str, shift, alphabet = englishAlphabet) => {
+-  // Create a cipher map:
+-  const cipherMap = getCipherMap(alphabet, -shift);
+-  return str
+-    .toLowerCase()
+-    .split('')
+-    .map((char) => cipherMap[char] || char)
+-    .join('');
++  return applyShift(str, -shift, alphabet);
+ };
+diff --git a/src/algorithms/cryptography/hill-cipher/hillCipher.js b/src/algorithms/cryptography/hill-cipher/hillCipher.js
+index 1fe3033..77b2aa9 100644
+--- a/src/algorithms/cryptography/hill-cipher/hillCipher.js
++++ b/src/algorithms/cryptography/hill-cipher/hillCipher.js
+@@ -1,87 +1,176 @@
+ import * as mtrx from '../../math/matrix/Matrix';
++import AlphabetCodec from '../alphabet/AlphabetCodec';
+ 
+-// The code of an 'A' character (equals to 65).
+-const alphabetCodeShift = 'A'.codePointAt(0);
+-const englishAlphabetSize = 26;
++// Default alphabet for the Hill cipher: uppercase English (A → 0 ... Z → 25).
++const DEFAULT_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+ 
+ /**
+- * Generates key matrix from given keyString.
++ * Builds an AlphabetCodec for the cipher.
+  *
+- * @param {string} keyString - a string to build a key matrix (must be of matrixSize^2 length).
+- * @return {number[][]} keyMatrix
++ * The Hill cipher requires that every message and key symbol belongs to the
++ * alphabet, therefore unknown symbols are rejected (not passed through).
++ *
++ * @param {string|string[]} alphabet
++ * @return {AlphabetCodec}
+  */
+-const generateKeyMatrix = (keyString) => {
++const buildCodec = (alphabet) => new AlphabetCodec(alphabet, {
++  caseSensitive: true,
++  preserveUnknown: false,
++});
++
++/**
++ * Computes the key block size and validates that the key length is a perfect
++ * square.
++ *
++ * @param {string} keyString
++ * @return {number}
++ * @throws {Error}
++ */
++const keyBlockSize = (keyString) => {
+   const matrixSize = Math.sqrt(keyString.length);
+   if (!Number.isInteger(matrixSize)) {
+     throw new Error(
+       'Invalid key string length. The square root of the key string must be an integer',
+     );
+   }
++  return matrixSize;
++};
++
++/**
++ * Generates the square key matrix from a given key string using the codec.
++ *
++ * @param {string} keyString
++ * @param {AlphabetCodec} codec
++ * @return {number[][]} keyMatrix
++ * @throws {Error}
++ */
++const generateKeyMatrix = (keyString, codec) => {
++  const matrixSize = keyBlockSize(keyString);
++  // Every key symbol must belong to the alphabet (throws otherwise).
++  const indices = codec.encode(keyString);
+   let keyStringIndex = 0;
+   return mtrx.generate(
+     [matrixSize, matrixSize],
+-    // Callback to get a value of each matrix cell.
+-    // The order the matrix is being filled in is from left to right, from top to bottom.
++    // The matrix is filled left to right, top to bottom.
+     () => {
+-      // A → 0, B → 1, ..., a → 32, b → 33, ...
+-      const charCodeShifted = (keyString.codePointAt(keyStringIndex)) % alphabetCodeShift;
++      const value = indices[keyStringIndex];
+       keyStringIndex += 1;
+-      return charCodeShifted;
++      return value;
+     },
+   );
+ };
+ 
+ /**
+- * Generates a message vector from a given message.
++ * Transforms a message through a key matrix block by block.
+  *
+- * @param {string} message - the message to encrypt.
+- * @return {number[][]} messageVector
++ * @param {number[]} indices - numeric indices of every message symbol.
++ * @param {number[][]} matrix - the (inverse) key matrix.
++ * @param {AlphabetCodec} codec
++ * @return {string}
+  */
+-const generateMessageVector = (message) => {
+-  return mtrx.generate(
+-    [message.length, 1],
+-    // Callback to get a value of each matrix cell.
+-    // The order the matrix is being filled in is from left to right, from top to bottom.
+-    (cellIndices) => {
+-      const rowIndex = cellIndices[0];
+-      return message.codePointAt(rowIndex) % alphabetCodeShift;
+-    },
+-  );
++const transformBlocks = (indices, matrix, codec) => {
++  const blockSize = matrix.length;
++  let output = '';
++  for (let start = 0; start < indices.length; start += blockSize) {
++    const block = indices.slice(start, start + blockSize);
++    const vector = block.map((value) => [value]);
++    const product = mtrx.dot(matrix, vector);
++    for (let row = 0; row < product.length; row += 1) {
++      // symbolAt normalizes the residue into [0, size).
++      output += codec.symbolAt(product[row][0]);
++    }
++  }
++  return output;
+ };
+ 
+ /**
+  * Encrypts the given message using Hill Cipher.
+  *
+- * @param {string} message plaintext
+- * @param {string} keyString
++ * @param {string} message - plaintext.
++ * @param {string} keyString - key used to build the key matrix.
++ * @param {object} [options]
++ * @param {string|string[]} [options.alphabet] - alphabet (default uppercase English).
++ * @param {boolean|string} [options.padding] - when the final block is
++ *   incomplete, enables padding. `true` pads with the alphabet's first symbol,
++ *   a single-character string pads with that specific symbol.
+  * @return {string} cipherString
++ * @throws {Error}
+  */
+-export function hillCipherEncrypt(message, keyString) {
+-  // The keyString and message can only contain letters.
+-  const onlyLettersRegExp = /^[a-zA-Z]+$/;
+-  if (!onlyLettersRegExp.test(message) || !onlyLettersRegExp.test(keyString)) {
+-    throw new Error('The message and key string can only contain letters');
++export function hillCipherEncrypt(message, keyString, options = {}) {
++  const { alphabet = DEFAULT_ALPHABET, padding } = options;
++  const codec = buildCodec(alphabet);
++
++  const blockSize = keyBlockSize(keyString);
++  const keyMatrix = generateKeyMatrix(keyString, codec);
++
++  // Require an invertible key matrix (throws for singular/non-invertible keys).
++  mtrx.inverseMod(keyMatrix, codec.size);
++
++  // Every message symbol must belong to the alphabet (throws otherwise).
++  // codec.encode returns a fresh array so the caller's input is never mutated.
++  const indices = codec.encode(message);
++
++  // Optionally pad an incomplete final block.
++  if (indices.length % blockSize !== 0) {
++    if (padding === undefined || padding === false) {
++      throw new Error(
++        'Message length must be a multiple of the key block size unless padding is enabled',
++      );
++    }
++    const paddingSymbol = padding === true ? codec.symbols[0] : padding;
++    const paddingIndex = codec.indexOf(paddingSymbol);
++    if (paddingIndex === -1) {
++      throw new Error('Padding symbol is not part of the alphabet');
++    }
++    while (indices.length % blockSize !== 0) {
++      indices.push(paddingIndex);
++    }
+   }
+ 
+-  const keyMatrix = generateKeyMatrix(keyString);
+-  const messageVector = generateMessageVector(message);
++  return transformBlocks(indices, keyMatrix, codec);
++}
+ 
+-  // keyString.length must equal to square of message.length
+-  if (keyMatrix.length !== message.length) {
+-    throw new Error('Invalid key string length. The key length must be a square of message length');
++/**
++ * Decrypts the given cipher text using Hill Cipher.
++ *
++ * @param {string} cipherText - the encrypted message.
++ * @param {string} keyString - key used to build the key matrix.
++ * @param {object} [options]
++ * @param {string|string[]} [options.alphabet] - alphabet (default uppercase English).
++ * @param {boolean|string} [options.stripPadding] - when set, removes trailing
++ *   padding symbols. `true` strips the alphabet's first symbol, a single
++ *   character string strips that specific symbol. Only caller-specified
++ *   padding is removed.
++ * @return {string} plaintext
++ * @throws {Error}
++ */
++export function hillCipherDecrypt(cipherText, keyString, options = {}) {
++  const { alphabet = DEFAULT_ALPHABET, stripPadding } = options;
++  const codec = buildCodec(alphabet);
++
++  const blockSize = keyBlockSize(keyString);
++  const keyMatrix = generateKeyMatrix(keyString, codec);
++
++  // Build the modular inverse of the key matrix (throws for non-invertible keys).
++  const inverseKeyMatrix = mtrx.inverseMod(keyMatrix, codec.size);
++
++  // Every cipher symbol must belong to the alphabet (throws otherwise).
++  const indices = codec.encode(cipherText);
++
++  if (indices.length % blockSize !== 0) {
++    throw new Error('Cipher text length must be a multiple of the key block size');
+   }
+ 
+-  const cipherVector = mtrx.dot(keyMatrix, messageVector);
+-  let cipherString = '';
+-  for (let row = 0; row < cipherVector.length; row += 1) {
+-    const item = cipherVector[row];
+-    cipherString += String.fromCharCode((item % englishAlphabetSize) + alphabetCodeShift);
++  let plaintext = transformBlocks(indices, inverseKeyMatrix, codec);
++
++  // Only remove caller-specified padding rather than silently stripping
++  // legitimate trailing characters.
++  if (stripPadding !== undefined && stripPadding !== false) {
++    const paddingSymbol = stripPadding === true ? codec.symbols[0] : stripPadding;
++    while (plaintext.length > 0 && plaintext[plaintext.length - 1] === paddingSymbol) {
++      plaintext = plaintext.slice(0, -1);
++    }
+   }
+ 
+-  return cipherString;
++  return plaintext;
+ }
+-
+-// @TODO: Implement this method.
+-export const hillCipherDecrypt = () => {
+-  throw new Error('This method is not implemented yet');
+-};
+diff --git a/src/algorithms/cryptography/polynomial-hash/SimplePolynomialHash.js b/src/algorithms/cryptography/polynomial-hash/SimplePolynomialHash.js
+index 8e1d512..4b19903 100644
+--- a/src/algorithms/cryptography/polynomial-hash/SimplePolynomialHash.js
++++ b/src/algorithms/cryptography/polynomial-hash/SimplePolynomialHash.js
+@@ -1,11 +1,18 @@
++import { mod } from '../../math/modular-arithmetic/modularArithmetic';
++
+ const DEFAULT_BASE = 17;
+ 
+ export default class SimplePolynomialHash {
+   /**
+    * @param {number} [base] - Base number that is used to create the polynomial.
++   * @param {number|null} [modulus] - Optional non-zero modulus. When provided,
++   *   every hash value is normalized into the non-negative range [0, modulus)
++   *   using canonical modular arithmetic. When omitted (the default), the hash
++   *   is computed without any modulo operation, preserving historic behavior.
+    */
+-  constructor(base = DEFAULT_BASE) {
++  constructor(base = DEFAULT_BASE, modulus = null) {
+     this.base = base;
++    this.modulus = modulus;
+   }
+ 
+   /**
+@@ -25,6 +32,10 @@ export default class SimplePolynomialHash {
+     let hash = 0;
+     for (let charIndex = 0; charIndex < word.length; charIndex += 1) {
+       hash += word.charCodeAt(charIndex) * (this.base ** charIndex);
++      if (this.modulus) {
++        // Normalize into [0, modulus) so residues never become negative.
++        hash = mod(hash, this.modulus);
++      }
+     }
+ 
+     return hash;
+@@ -54,10 +65,18 @@ export default class SimplePolynomialHash {
+     const prevValue = prevWord.charCodeAt(0);
+     const newValue = newWord.charCodeAt(newWord.length - 1);
+ 
+-    hash -= prevValue;
++    // Canonical modular subtraction keeps the rolling hash non-negative after
++    // deleting the leading character. Without a configured modulus this is the
++    // historic plain subtraction so existing behavior is preserved.
++    hash = this.modulus ? mod(hash - prevValue, this.modulus) : hash - prevValue;
+     hash /= this.base;
+     hash += newValue * (this.base ** (newWord.length - 1));
+ 
++    if (this.modulus) {
++      // Re-appending a character must also stay within [0, modulus).
++      hash = mod(hash, this.modulus);
++    }
++
+     return hash;
+   }
+ }
+diff --git a/src/algorithms/cryptography/rail-fence-cipher/railFenceCipher.js b/src/algorithms/cryptography/rail-fence-cipher/railFenceCipher.js
+index 7b58037..f6c519f 100644
+--- a/src/algorithms/cryptography/rail-fence-cipher/railFenceCipher.js
++++ b/src/algorithms/cryptography/rail-fence-cipher/railFenceCipher.js
+@@ -200,7 +200,14 @@ const decodeFence = (params) => {
+  * @param {number} railCount - The number of rails in a fence
+  * @returns {string} - Encoded string
+  */
++const validateRailCount = (railCount) => {
++  if (!Number.isInteger(railCount) || railCount < 2) {
++    throw new Error('Rail count must be an integer greater than or equal to 2');
++  }
++};
++
+ export const encodeRailFenceCipher = (string, railCount) => {
++  validateRailCount(railCount);
+   const fence = buildFence(railCount);
+ 
+   const filledFence = fillEncodeFence({
+@@ -221,6 +228,7 @@ export const encodeRailFenceCipher = (string, railCount) => {
+  * @returns {string} - Decoded string.
+  */
+ export const decodeRailFenceCipher = (string, railCount) => {
++  validateRailCount(railCount);
+   const strLen = string.length;
+   const emptyFence = buildFence(railCount);
+   const filledFence = fillDecodeFence({
+diff --git a/src/algorithms/math/euclidean-algorithm/euclideanAlgorithm.js b/src/algorithms/math/euclidean-algorithm/euclideanAlgorithm.js
+index b9cec97..746d51f 100644
+--- a/src/algorithms/math/euclidean-algorithm/euclideanAlgorithm.js
++++ b/src/algorithms/math/euclidean-algorithm/euclideanAlgorithm.js
+@@ -13,3 +13,43 @@ export default function euclideanAlgorithm(originalA, originalB) {
+   // we may use modulo operation.
+   return (b === 0) ? a : euclideanAlgorithm(b, a % b);
+ }
++
++/**
++ * Iterative extended Euclidean algorithm.
++ *
++ * Returns the greatest common divisor of `a` and `b` together with the Bézout
++ * coefficients `x` and `y` such that `a * x + b * y === gcd`. The returned gcd
++ * is always non-negative. This is a named export that lives alongside the
++ * default GCD export so existing callers remain unaffected.
++ *
++ * @param {number} a
++ * @param {number} b
++ * @return {{ gcd: number, x: number, y: number }}
++ */
++export function extendedEuclideanAlgorithm(a, b) {
++  let oldR = a;
++  let r = b;
++  let oldS = 1;
++  let s = 0;
++  let oldT = 0;
++  let t = 1;
++
++  while (r !== 0) {
++    const quotient = Math.floor(oldR / r);
++
++    [oldR, r] = [r, oldR - quotient * r];
++    [oldS, s] = [s, oldS - quotient * s];
++    [oldT, t] = [t, oldT - quotient * t];
++  }
++
++  // Normalize the sign of the gcd so it is always non-negative.
++  if (oldR < 0) {
++    return { gcd: -oldR, x: -oldS, y: -oldT };
++  }
++
++  return { gcd: oldR, x: oldS, y: oldT };
++}
++
++// Named alias so callers may import the extended algorithm under a short name
++// without colliding with the default GCD export.
++export { extendedEuclideanAlgorithm as extendedEuclidean };
+diff --git a/src/algorithms/math/least-common-multiple/leastCommonMultiple.js b/src/algorithms/math/least-common-multiple/leastCommonMultiple.js
+index 26a7681..4deb696 100644
+--- a/src/algorithms/math/least-common-multiple/leastCommonMultiple.js
++++ b/src/algorithms/math/least-common-multiple/leastCommonMultiple.js
+@@ -1,11 +1,24 @@
+ import euclideanAlgorithm from '../euclidean-algorithm/euclideanAlgorithm';
+ 
+ /**
++ * Least common multiple that is safe for integer zero and signed inputs.
++ *
++ * The result is always non-negative and is zero whenever either operand is
++ * zero (avoiding a division by a zero gcd). Signed inputs are normalized so
++ * that lcm(a, b) === lcm(|a|, |b|).
++ *
+  * @param {number} a
+  * @param {number} b
+  * @return {number}
+  */
+ 
+ export default function leastCommonMultiple(a, b) {
+-  return ((a === 0) || (b === 0)) ? 0 : Math.abs(a * b) / euclideanAlgorithm(a, b);
++  if (a === 0 || b === 0) {
++    return 0;
++  }
++
++  const absA = Math.abs(a);
++  const absB = Math.abs(b);
++
++  return (absA / euclideanAlgorithm(absA, absB)) * absB;
+ }
+diff --git a/src/algorithms/math/matrix/Matrix.js b/src/algorithms/math/matrix/Matrix.js
+index 2aee126..6feea4b 100644
+--- a/src/algorithms/math/matrix/Matrix.js
++++ b/src/algorithms/math/matrix/Matrix.js
+@@ -1,3 +1,5 @@
++import { mod, modularInverse } from '../modular-arithmetic/modularArithmetic';
++
+ /**
+  * @typedef {number} Cell
+  * @typedef {Cell[][]|Cell[][][]} Matrix
+@@ -307,3 +309,120 @@ export const sub = (a, b) => {
+ 
+   return result;
+ };
++
++/**
++ * Validates that a matrix is a non-ragged 2D square matrix.
++ *
++ * @param {Matrix} m
++ * @throws {Error}
++ */
++export const validateSquare = (m) => {
++  validate2D(m);
++  const rowCount = m.length;
++  for (let row = 0; row < rowCount; row += 1) {
++    if (!Array.isArray(m[row]) || m[row].length !== rowCount) {
++      throw new Error('Matrix is not square');
++    }
++  }
++};
++
++/**
++ * Returns the minor of a square matrix: a copy with the given row and column
++ * removed. The source matrix is never mutated.
++ *
++ * @param {Matrix} matrix
++ * @param {number} row
++ * @param {number} column
++ * @return {Matrix}
++ * @throws {Error}
++ */
++export const minor = (matrix, row, column) => {
++  validateSquare(matrix);
++  return matrix
++    .filter((_, rowIndex) => rowIndex !== row)
++    .map((currentRow) => currentRow.filter((_, colIndex) => colIndex !== column));
++};
++
++/**
++ * Computes the determinant of a square matrix via Laplace expansion.
++ *
++ * @param {Matrix} matrix
++ * @return {number}
++ * @throws {Error}
++ */
++export const determinant = (matrix) => {
++  validateSquare(matrix);
++  const size = matrix.length;
++
++  if (size === 1) {
++    return matrix[0][0];
++  }
++  if (size === 2) {
++    return (matrix[0][0] * matrix[1][1]) - (matrix[0][1] * matrix[1][0]);
++  }
++
++  let result = 0;
++  for (let column = 0; column < size; column += 1) {
++    const sign = column % 2 === 0 ? 1 : -1;
++    result += sign * matrix[0][column] * determinant(minor(matrix, 0, column));
++  }
++  return result;
++};
++
++/**
++ * Computes the cofactor matrix of a square matrix.
++ *
++ * @param {Matrix} matrix
++ * @return {Matrix}
++ * @throws {Error}
++ */
++export const cofactors = (matrix) => {
++  validateSquare(matrix);
++  const size = matrix.length;
++
++  if (size === 1) {
++    return [[1]];
++  }
++
++  return matrix.map((currentRow, row) => currentRow.map((cellValue, column) => {
++    const sign = (row + column) % 2 === 0 ? 1 : -1;
++    return sign * determinant(minor(matrix, row, column));
++  }));
++};
++
++/**
++ * Computes the adjugate (transpose of the cofactor matrix) of a square matrix.
++ *
++ * @param {Matrix} matrix
++ * @return {Matrix}
++ * @throws {Error}
++ */
++export const adjugate = (matrix) => {
++  validateSquare(matrix);
++  return t(cofactors(matrix));
++};
++
++/**
++ * Computes the modular inverse of a square integer matrix modulo `modulus`.
++ *
++ * Works for any square integer matrix whose determinant is coprime with the
++ * modulus. Every output cell is normalized into [0, modulus). Singular or
++ * non-invertible keys are rejected. The source matrix is never mutated.
++ *
++ * @param {Matrix} matrix
++ * @param {number} modulus
++ * @return {Matrix}
++ * @throws {Error}
++ */
++export const inverseMod = (matrix, modulus) => {
++  validateSquare(matrix);
++
++  const det = determinant(matrix);
++  // Throws when the determinant has no inverse modulo `modulus`.
++  const detInverse = modularInverse(det, modulus);
++
++  const adj = adjugate(matrix);
++  return adj.map(
++    (currentRow) => currentRow.map((cellValue) => mod(cellValue * detInverse, modulus)),
++  );
++};
+diff --git a/src/algorithms/math/modular-arithmetic/modularArithmetic.js b/src/algorithms/math/modular-arithmetic/modularArithmetic.js
+new file mode 100644
+index 0000000..68f3a96
+--- /dev/null
++++ b/src/algorithms/math/modular-arithmetic/modularArithmetic.js
+@@ -0,0 +1,108 @@
++/**
++ * Reusable, deterministic modular-arithmetic helpers.
++ *
++ * All helpers operate on ordinary JavaScript numbers and validate that their
++ * operands are safe integers so that modular multiplication used by callers
++ * (e.g. the Hill cipher) can never silently become ambiguous. None of the
++ * helpers mutate their inputs.
++ */
++
++/**
++ * Ensures the provided value is a safe integer.
++ *
++ * @param {number} value
++ * @param {string} [name] - Human readable operand name for error messages.
++ * @throws {Error}
++ */
++const assertSafeInteger = (value, name = 'value') => {
++  if (typeof value !== 'number' || !Number.isSafeInteger(value)) {
++    throw new Error(`Expected ${name} to be a safe integer`);
++  }
++};
++
++/**
++ * Canonical modulo that always returns a non-negative residue in [0, modulus).
++ * Unlike the native `%` operator it normalizes negative operands.
++ *
++ * @param {number} value
++ * @param {number} modulus - A non-zero safe integer.
++ * @return {number}
++ * @throws {Error}
++ */
++export const mod = (value, modulus) => {
++  assertSafeInteger(value, 'value');
++  assertSafeInteger(modulus, 'modulus');
++  if (modulus === 0) {
++    throw new Error('Modulus must not be zero');
++  }
++  const absModulus = Math.abs(modulus);
++  const remainder = value % absModulus;
++  return remainder < 0 ? remainder + absModulus : remainder;
++};
++
++/**
++ * Iterative extended Euclidean algorithm.
++ *
++ * Returns the greatest common divisor of `a` and `b` together with the Bézout
++ * coefficients `x` and `y` such that `a * x + b * y === gcd`.
++ *
++ * @param {number} a
++ * @param {number} b
++ * @return {{ gcd: number, x: number, y: number }}
++ * @throws {Error}
++ */
++export const extendedEuclidean = (a, b) => {
++  assertSafeInteger(a, 'a');
++  assertSafeInteger(b, 'b');
++
++  let oldR = a;
++  let r = b;
++  let oldS = 1;
++  let s = 0;
++  let oldT = 0;
++  let t = 1;
++
++  while (r !== 0) {
++    const quotient = Math.floor(oldR / r);
++
++    [oldR, r] = [r, oldR - quotient * r];
++    [oldS, s] = [s, oldS - quotient * s];
++    [oldT, t] = [t, oldT - quotient * t];
++  }
++
++  // Normalize the sign of the gcd so it is always non-negative.
++  if (oldR < 0) {
++    return { gcd: -oldR, x: -oldS, y: -oldT };
++  }
++
++  return { gcd: oldR, x: oldS, y: oldT };
++};
++
++/**
++ * Computes the modular multiplicative inverse of `value` modulo `modulus`.
++ *
++ * The inverse exists only when `value` and `modulus` are coprime. Otherwise an
++ * explicit error is thrown. The result is normalized into [0, modulus).
++ *
++ * @param {number} value
++ * @param {number} modulus - A non-zero safe integer.
++ * @return {number}
++ * @throws {Error}
++ */
++export const modularInverse = (value, modulus) => {
++  assertSafeInteger(value, 'value');
++  assertSafeInteger(modulus, 'modulus');
++  if (modulus === 0) {
++    throw new Error('Modulus must not be zero');
++  }
++
++  const absModulus = Math.abs(modulus);
++  const normalizedValue = mod(value, absModulus);
++  const { gcd, x } = extendedEuclidean(normalizedValue, absModulus);
++
++  if (gcd !== 1) {
++    throw new Error(`${value} has no modular inverse modulo ${modulus}`);
++  }
++
++  return mod(x, absModulus);
++};

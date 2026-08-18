@@ -1,0 +1,44 @@
+schema_version = "1.3"
+artifacts = ["/logs/artifacts"]
+
+[[verifier.collect]]
+command = "cd /app && git add -A && git diff --binary --cached ec61f187fe39b0aa8ec6b508f2553b2047dc30cc > /logs/artifacts/model.patch"
+service = "main"
+
+[task]
+name = "datacurve/add-functional-traversal-utilities-reduce-fi-0004"
+description = "Add functional traversal utilities (reduce, filter, find, toKeyedArray) to React.Children with a shared key-path module"
+authors = []
+keywords = []
+
+[metadata]
+task_id = "add-functional-traversal-utilities-reduce-fi-0004"
+display_title = "Add functional traversal utilities (reduce, filter, find, toKeyedArray) to React.Children with a shared key-path module"
+display_description = "React.Children today exposes only `map`, `forEach`, `count`, `toArray`, and `only`. Application and library authors who need to fold over, select, or inspect an opaque `children` value are forced to first materialize `React.Children.toArray(children)` and then use Array methods. That is wasteful (an intermediate array is always allocated), and — more importantly — it loses the stable, collision-free traversal keys React computes internally, so downstream code that re-keys or reconciles selected "
+original_title = "Add functional traversal utilities (reduce, filter, find, toKeyedArray) to React.Children with a shared key-path module"
+category = "feature_request"
+language = "javascript"
+repository = "react/react"
+repository_url = "https://github.com/react/react.git"
+base_commit_hash = "ec61f187fe39b0aa8ec6b508f2553b2047dc30cc"
+
+[verifier]
+network_mode = "public"
+environment_mode = "shared"
+timeout_sec = 1800.0
+
+[verifier.env]
+[agent]
+network_mode = "public"
+timeout_sec = 5400.0
+
+[environment]
+build_timeout_sec = 1800.0
+cpus = 2
+memory_mb = 8192
+storage_mb = 20480
+gpus = 0
+mcp_servers = []
+
+[environment.env]
+[solution.env]

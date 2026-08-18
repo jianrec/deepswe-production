@@ -1,0 +1,7 @@
+{
+  "mode": "remote-pinned-checkout",
+  "repository": "trekhleb/javascript-algorithms",
+  "base_commit_hash": "85293e3e2b88f4d2ce330d956b139cf628aa1e82",
+  "cache_path": "workspaces/repositories/trekhleb__javascript-algorithms",
+  "remote_fetch_in_dockerfile": true
+}

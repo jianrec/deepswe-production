@@ -1,0 +1,479 @@
+diff --git a/tests/hidden_sort_cli.rs b/tests/hidden_sort_cli.rs
+new file mode 100644
+index 0000000..44baeac
+--- /dev/null
++++ b/tests/hidden_sort_cli.rs
+@@ -0,0 +1,56 @@
++use std::fs;
++use std::process::{Command, Output};
++use tempfile::TempDir;
++
++fn run(dir: &TempDir, args: &[&str]) -> Output {
++    Command::new(env!("CARGO_BIN_EXE_fd")).current_dir(dir.path()).args(["--color", "never"]).args(args).output().unwrap()
++}
++fn stdout(output: &Output) -> String { String::from_utf8(output.stdout.clone()).unwrap() }
++fn stderr(output: &Output) -> String { String::from_utf8(output.stderr.clone()).unwrap() }
++
++#[test]
++fn invalid_sort_value_is_a_usage_error_listing_all_keys() {
++    let dir = TempDir::new().unwrap();
++    let output = run(&dir, &["--sort", "bogus"]);
++    assert!(!output.status.success());
++    let error = stderr(&output);
++    for key in ["path", "name", "size", "modified", "accessed", "created", "extension", "none"] { assert!(error.contains(key), "missing {key}: {error}"); }
++}
++
++#[test]
++fn reverse_without_sort_is_rejected_by_clap() {
++    let dir = TempDir::new().unwrap();
++    let output = run(&dir, &["--reverse"]);
++    assert!(!output.status.success());
++    assert!(stderr(&output).contains("--sort"));
++}
++
++#[test]
++fn reverse_with_sort_none_is_rejected() {
++    let dir = TempDir::new().unwrap();
++    let output = run(&dir, &["--sort", "none", "--reverse"]);
++    assert!(!output.status.success());
++    let error = stderr(&output);
++    assert!(error.contains("--sort"));
++    assert!(error.contains("--reverse"));
++}
++
++#[test]
++fn explicit_sort_none_is_accepted_and_matches_unsorted_single_thread_output() {
++    let dir = TempDir::new().unwrap();
++    for name in ["c", "a", "b"] { fs::write(dir.path().join(name), b"").unwrap(); }
++    let base = run(&dir, &["--threads", "1", "--type", "f"]);
++    let none = run(&dir, &["--threads", "1", "--type", "f", "--sort", "none"]);
++    assert!(base.status.success()); assert!(none.status.success());
++    assert_eq!(stdout(&base), stdout(&none));
++}
++
++#[test]
++fn long_help_advertises_sort_and_reverse() {
++    let dir = TempDir::new().unwrap();
++    let output = run(&dir, &["--help"]);
++    assert!(output.status.success());
++    let help = stdout(&output);
++    assert!(help.contains("--sort <key>"));
++    assert!(help.contains("--reverse"));
++}
+diff --git a/tests/hidden_sort_edges.rs b/tests/hidden_sort_edges.rs
+new file mode 100644
+index 0000000..bd6f0fc
+--- /dev/null
++++ b/tests/hidden_sort_edges.rs
+@@ -0,0 +1,59 @@
++use std::fs;
++use std::os::unix::ffi::OsStringExt;
++use std::process::{Command, Output};
++use tempfile::TempDir;
++
++fn run(dir: &TempDir, args: &[&str]) -> Output {
++    Command::new(env!("CARGO_BIN_EXE_fd")).current_dir(dir.path()).args(["--color", "never"]).args(args).output().unwrap()
++}
++fn lines(output: &Output) -> Vec<String> {
++    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
++    String::from_utf8(output.stdout.clone()).unwrap().lines().map(str::to_owned).collect()
++}
++
++#[test]
++fn sorted_search_combines_all_explicit_roots_before_ordering() {
++    let dir = TempDir::new().unwrap();
++    fs::create_dir_all(dir.path().join("left")).unwrap(); fs::create_dir_all(dir.path().join("right")).unwrap();
++    fs::write(dir.path().join("left/zebra"), b"").unwrap(); fs::write(dir.path().join("right/apple"), b"").unwrap();
++    assert_eq!(lines(&run(&dir, &["--type", "f", "--sort", "name", ".", "left", "right"])), ["right/apple", "left/zebra"]);
++}
++
++#[test]
++fn sorted_mode_ignores_zero_max_buffer_time() {
++    let dir = TempDir::new().unwrap();
++    for index in (0..80).rev() { fs::write(dir.path().join(format!("f{index:03}")), b"").unwrap(); }
++    let output = lines(&run(&dir, &["--type", "f", "--max-buffer-time", "0", "--sort", "path"]));
++    let mut expected = output.clone(); expected.sort();
++    assert_eq!(output, expected);
++}
++
++#[test]
++fn broken_symlink_metadata_fallback_does_not_panic() {
++    let dir = TempDir::new().unwrap();
++    std::os::unix::fs::symlink("missing-target", dir.path().join("broken")).unwrap();
++    fs::write(dir.path().join("regular"), b"x").unwrap();
++    let output = run(&dir, &["--hidden", "--no-ignore", "--sort", "size"]);
++    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
++    assert!(String::from_utf8_lossy(&output.stdout).contains("broken"));
++}
++
++#[test]
++fn path_sort_compares_raw_non_utf8_os_bytes() {
++    let dir = TempDir::new().unwrap();
++    fs::write(dir.path().join(std::ffi::OsString::from_vec(vec![b'b', 0x80])), b"").unwrap();
++    fs::write(dir.path().join(std::ffi::OsString::from_vec(vec![b'a', 0xff])), b"").unwrap();
++    let output = run(&dir, &["--type", "f", "--sort", "path", "--print0"]);
++    assert!(output.status.success());
++    assert_eq!(output.stdout, vec![b'.', b'/', b'a', 0xff, 0, b'.', b'/', b'b', 0x80, 0]);
++}
++
++#[test]
++fn extension_sort_compares_raw_non_utf8_extension_bytes() {
++    let dir = TempDir::new().unwrap();
++    fs::write(dir.path().join(std::ffi::OsString::from_vec(vec![b'a', b'.', 0xff])), b"").unwrap();
++    fs::write(dir.path().join(std::ffi::OsString::from_vec(vec![b'b', b'.', 0x80])), b"").unwrap();
++    let output = run(&dir, &["--type", "f", "--sort", "extension", "--print0"]);
++    assert!(output.status.success());
++    assert_eq!(output.stdout, vec![b'.', b'/', b'b', b'.', 0x80, 0, b'.', b'/', b'a', b'.', 0xff, 0]);
++}
+diff --git a/tests/hidden_sort_exec.rs b/tests/hidden_sort_exec.rs
+new file mode 100644
+index 0000000..ca55434
+--- /dev/null
++++ b/tests/hidden_sort_exec.rs
+@@ -0,0 +1,48 @@
++use std::fs;
++use std::process::{Command, Output};
++use tempfile::TempDir;
++
++fn run(dir: &TempDir, args: &[&str]) -> Output {
++    Command::new(env!("CARGO_BIN_EXE_fd")).current_dir(dir.path()).args(["--color", "never", "--type", "f"]).args(args).output().unwrap()
++}
++fn lines(output: &Output) -> Vec<String> {
++    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
++    String::from_utf8(output.stdout.clone()).unwrap().lines().map(str::to_owned).collect()
++}
++fn files(dir: &TempDir) { for name in ["zeta", "alpha", "middle"] { fs::write(dir.path().join(name), b"").unwrap(); } }
++
++#[test]
++fn exec_commands_run_in_name_sorted_order() {
++    let dir = TempDir::new().unwrap(); files(&dir);
++    let output = run(&dir, &["--sort", "name", "--exec", "sh", "-c", "printf '%s\\n' \"$1\"", "sh", "{}"]);
++    assert_eq!(lines(&output), ["./alpha", "./middle", "./zeta"]);
++}
++
++#[test]
++fn exec_commands_run_in_reverse_name_order() {
++    let dir = TempDir::new().unwrap(); files(&dir);
++    let output = run(&dir, &["--sort", "name", "--reverse", "--exec", "sh", "-c", "printf '%s\\n' \"$1\"", "sh", "{}"]);
++    assert_eq!(lines(&output), ["./zeta", "./middle", "./alpha"]);
++}
++
++#[test]
++fn exec_batch_arguments_follow_path_sort_order() {
++    let dir = TempDir::new().unwrap(); files(&dir);
++    let output = run(&dir, &["--sort", "path", "--exec-batch", "printf", "%s\\n", "{}"]);
++    assert_eq!(lines(&output), ["./alpha", "./middle", "./zeta"]);
++}
++
++#[test]
++fn exec_batch_arguments_follow_reverse_path_order() {
++    let dir = TempDir::new().unwrap(); files(&dir);
++    let output = run(&dir, &["--sort", "path", "--reverse", "--exec-batch", "printf", "%s\\n", "{}"]);
++    assert_eq!(lines(&output), ["./zeta", "./middle", "./alpha"]);
++}
++
++#[test]
++fn size_sorted_exec_receives_numeric_size_order() {
++    let dir = TempDir::new().unwrap();
++    fs::write(dir.path().join("large"), vec![0; 100]).unwrap(); fs::write(dir.path().join("small"), vec![0; 9]).unwrap();
++    let output = run(&dir, &["--sort", "size", "--exec", "sh", "-c", "printf '%s\\n' \"$1\"", "sh", "{}"]);
++    assert_eq!(lines(&output), ["./small", "./large"]);
++}
+diff --git a/tests/hidden_sort_extension.rs b/tests/hidden_sort_extension.rs
+new file mode 100644
+index 0000000..291311c
+--- /dev/null
++++ b/tests/hidden_sort_extension.rs
+@@ -0,0 +1,45 @@
++use std::fs;
++use std::process::{Command, Output};
++use tempfile::TempDir;
++
++fn run(dir: &TempDir, args: &[&str]) -> Output {
++    Command::new(env!("CARGO_BIN_EXE_fd")).current_dir(dir.path()).args(["--color", "never", "--type", "f"]).args(args).output().unwrap()
++}
++fn lines(output: &Output) -> Vec<String> {
++    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
++    String::from_utf8(output.stdout.clone()).unwrap().lines().map(str::to_owned).collect()
++}
++fn files(dir: &TempDir, names: &[&str]) { for name in names { fs::write(dir.path().join(name), b"").unwrap(); } }
++
++#[test]
++fn sort_extension_places_missing_extensions_first() {
++    let dir = TempDir::new().unwrap(); files(&dir, &["z.txt", "plain", "a.rs"]);
++    assert_eq!(lines(&run(&dir, &["--sort", "extension"])), ["plain", "a.rs", "z.txt"]);
++}
++
++#[test]
++fn sort_extension_compares_extension_case_sensitively() {
++    let dir = TempDir::new().unwrap(); files(&dir, &["a.rs", "b.RS", "c.Rs"]);
++    assert_eq!(lines(&run(&dir, &["--sort", "extension"])), ["b.RS", "c.Rs", "a.rs"]);
++}
++
++#[test]
++fn sort_extension_breaks_ties_by_name_then_path() {
++    let dir = TempDir::new().unwrap();
++    fs::create_dir_all(dir.path().join("a")).unwrap(); fs::create_dir_all(dir.path().join("z")).unwrap();
++    files(&dir, &["beta.log", "alpha.log"]);
++    fs::write(dir.path().join("a/same.log"), b"").unwrap(); fs::write(dir.path().join("z/same.log"), b"").unwrap();
++    assert_eq!(lines(&run(&dir, &["--sort", "extension"])), ["alpha.log", "beta.log", "a/same.log", "z/same.log"]);
++}
++
++#[test]
++fn sort_extension_uses_only_the_final_suffix() {
++    let dir = TempDir::new().unwrap(); files(&dir, &["archive.tar.gz", "archive.gz", "notes.txt"]);
++    assert_eq!(lines(&run(&dir, &["--sort", "extension"])), ["archive.gz", "archive.tar.gz", "notes.txt"]);
++}
++
++#[test]
++fn reverse_extension_reverses_all_tie_breakers() {
++    let dir = TempDir::new().unwrap(); files(&dir, &["plain", "a.rs", "b.rs", "z.txt"]);
++    assert_eq!(lines(&run(&dir, &["--sort", "extension", "--reverse"])), ["z.txt", "b.rs", "a.rs", "plain"]);
++}
+diff --git a/tests/hidden_sort_name_path.rs b/tests/hidden_sort_name_path.rs
+new file mode 100644
+index 0000000..9a4d31d
+--- /dev/null
++++ b/tests/hidden_sort_name_path.rs
+@@ -0,0 +1,69 @@
++use std::fs;
++use std::process::{Command, Output};
++use tempfile::TempDir;
++
++fn run(dir: &TempDir, args: &[&str]) -> Output {
++    Command::new(env!("CARGO_BIN_EXE_fd"))
++        .current_dir(dir.path())
++        .args(["--color", "never", "--type", "f"])
++        .args(args)
++        .output()
++        .unwrap()
++}
++
++fn lines(output: &Output) -> Vec<String> {
++    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
++    String::from_utf8(output.stdout.clone()).unwrap().lines().map(str::to_owned).collect()
++}
++
++#[test]
++fn sort_path_orders_full_paths() {
++    let dir = TempDir::new().unwrap();
++    fs::create_dir_all(dir.path().join("z")).unwrap();
++    fs::create_dir_all(dir.path().join("a")).unwrap();
++    fs::write(dir.path().join("z/first"), b"").unwrap();
++    fs::write(dir.path().join("a/second"), b"").unwrap();
++    assert_eq!(lines(&run(&dir, &["--sort", "path"])), ["a/second", "z/first"]);
++}
++
++#[test]
++fn sort_name_orders_by_basename_not_parent() {
++    let dir = TempDir::new().unwrap();
++    fs::create_dir_all(dir.path().join("a")).unwrap();
++    fs::create_dir_all(dir.path().join("z")).unwrap();
++    fs::write(dir.path().join("a/zebra"), b"").unwrap();
++    fs::write(dir.path().join("z/apple"), b"").unwrap();
++    assert_eq!(lines(&run(&dir, &["--sort", "name"])), ["z/apple", "a/zebra"]);
++}
++
++#[test]
++fn sort_name_breaks_equal_basename_ties_by_path() {
++    let dir = TempDir::new().unwrap();
++    for parent in ["c", "a", "b"] {
++        fs::create_dir_all(dir.path().join(parent)).unwrap();
++        fs::write(dir.path().join(parent).join("same"), b"").unwrap();
++    }
++    assert_eq!(lines(&run(&dir, &["--sort", "name"])), ["a/same", "b/same", "c/same"]);
++}
++
++#[test]
++fn sort_name_is_identical_across_thread_counts() {
++    let dir = TempDir::new().unwrap();
++    for index in (0..40).rev() {
++        let parent = format!("d{}", index % 7);
++        fs::create_dir_all(dir.path().join(&parent)).unwrap();
++        fs::write(dir.path().join(parent).join(format!("f{index:02}")), b"").unwrap();
++    }
++    let one = lines(&run(&dir, &["--threads", "1", "--sort", "name"]));
++    let many = lines(&run(&dir, &["--threads", "8", "--sort", "name"]));
++    assert_eq!(one, many);
++}
++
++#[test]
++fn sort_name_is_case_sensitive() {
++    let dir = TempDir::new().unwrap();
++    for name in ["alpha", "Beta", "ALPHA", "beta"] {
++        fs::write(dir.path().join(name), b"").unwrap();
++    }
++    assert_eq!(lines(&run(&dir, &["--sort", "name"])), ["ALPHA", "Beta", "alpha", "beta"]);
++}
+diff --git a/tests/hidden_sort_output.rs b/tests/hidden_sort_output.rs
+new file mode 100644
+index 0000000..21200b8
+--- /dev/null
++++ b/tests/hidden_sort_output.rs
+@@ -0,0 +1,52 @@
++use std::fs;
++use std::process::{Command, Output};
++use tempfile::TempDir;
++
++fn run(dir: &TempDir, args: &[&str]) -> Output {
++    Command::new(env!("CARGO_BIN_EXE_fd")).current_dir(dir.path()).env("NO_COLOR", "1").args(args).output().unwrap()
++}
++fn text_lines(output: &Output) -> Vec<String> {
++    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
++    String::from_utf8(output.stdout.clone()).unwrap().lines().map(str::to_owned).collect()
++}
++
++#[test]
++fn null_separator_preserves_sorted_order() {
++    let dir = TempDir::new().unwrap();
++    for name in ["z", "a", "m"] { fs::write(dir.path().join(name), b"").unwrap(); }
++    let output = run(&dir, &["--color", "never", "--type", "f", "--sort", "name", "--print0"]);
++    assert!(output.status.success());
++    assert_eq!(output.stdout, b"./a\0./m\0./z\0");
++}
++
++#[test]
++fn list_details_preserves_name_sorted_path_order() {
++    let dir = TempDir::new().unwrap();
++    for name in ["z", "a", "m"] { fs::write(dir.path().join(name), b"x").unwrap(); }
++    let output = run(&dir, &["--color", "never", "--type", "f", "--sort", "name", "--list-details"]);
++    let names: Vec<_> = text_lines(&output).iter().map(|line| line.split_whitespace().last().unwrap().to_owned()).collect();
++    assert_eq!(names, ["./a", "./m", "./z"]);
++}
++
++#[test]
++fn hidden_filtering_remains_active_when_sorting() {
++    let dir = TempDir::new().unwrap();
++    fs::write(dir.path().join("visible"), b"").unwrap(); fs::write(dir.path().join(".hidden"), b"").unwrap();
++    assert_eq!(text_lines(&run(&dir, &["--color", "never", "--type", "f", "--sort", "path"])), ["visible"]);
++}
++
++#[test]
++fn explicit_hidden_results_are_sorted_normally() {
++    let dir = TempDir::new().unwrap();
++    for name in ["visible", ".z-hidden", ".a-hidden"] { fs::write(dir.path().join(name), b"").unwrap(); }
++    assert_eq!(text_lines(&run(&dir, &["--color", "never", "--type", "f", "--hidden", "--sort", "path"])), [".a-hidden", ".z-hidden", "visible"]);
++}
++
++#[test]
++fn no_matches_keeps_the_existing_nonzero_exit_code() {
++    let dir = TempDir::new().unwrap();
++    fs::write(dir.path().join("present"), b"").unwrap();
++    let output = run(&dir, &["--color", "never", "--sort", "name", "does-not-match"]);
++    assert!(!output.status.success());
++    assert!(output.stdout.is_empty());
++}
+diff --git a/tests/hidden_sort_size.rs b/tests/hidden_sort_size.rs
+new file mode 100644
+index 0000000..b8222a8
+--- /dev/null
++++ b/tests/hidden_sort_size.rs
+@@ -0,0 +1,47 @@
++use std::fs;
++use std::process::{Command, Output};
++use tempfile::TempDir;
++
++fn run(dir: &TempDir, args: &[&str]) -> Output {
++    Command::new(env!("CARGO_BIN_EXE_fd")).current_dir(dir.path()).args(["--color", "never", "--type", "f"]).args(args).output().unwrap()
++}
++fn lines(output: &Output) -> Vec<String> {
++    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
++    String::from_utf8(output.stdout.clone()).unwrap().lines().map(str::to_owned).collect()
++}
++fn file(dir: &TempDir, name: &str, size: usize) { fs::write(dir.path().join(name), vec![b'x'; size]).unwrap(); }
++
++#[test]
++fn sort_size_uses_numeric_byte_lengths() {
++    let dir = TempDir::new().unwrap();
++    file(&dir, "hundred", 100); file(&dir, "nine", 9); file(&dir, "ten", 10);
++    assert_eq!(lines(&run(&dir, &["--sort", "size"])), ["nine", "ten", "hundred"]);
++}
++
++#[test]
++fn sort_size_breaks_ties_by_full_path() {
++    let dir = TempDir::new().unwrap();
++    for name in ["z", "a", "m"] { file(&dir, name, 7); }
++    assert_eq!(lines(&run(&dir, &["--sort", "size"])), ["a", "m", "z"]);
++}
++
++#[test]
++fn sort_size_places_zero_length_files_first() {
++    let dir = TempDir::new().unwrap();
++    file(&dir, "nonempty", 1); file(&dir, "empty-b", 0); file(&dir, "empty-a", 0);
++    assert_eq!(lines(&run(&dir, &["--sort", "size"])), ["empty-a", "empty-b", "nonempty"]);
++}
++
++#[test]
++fn reverse_size_reverses_the_complete_total_order() {
++    let dir = TempDir::new().unwrap();
++    file(&dir, "a", 2); file(&dir, "b", 2); file(&dir, "c", 1);
++    assert_eq!(lines(&run(&dir, &["--sort", "size", "--reverse"])), ["b", "a", "c"]);
++}
++
++#[test]
++fn max_results_is_applied_after_size_sorting() {
++    let dir = TempDir::new().unwrap();
++    file(&dir, "large", 500); file(&dir, "small", 1); file(&dir, "medium", 20); file(&dir, "tiny", 0);
++    assert_eq!(lines(&run(&dir, &["--sort", "size", "--max-results", "3"])), ["tiny", "small", "medium"]);
++}
+diff --git a/tests/hidden_sort_times.rs b/tests/hidden_sort_times.rs
+new file mode 100644
+index 0000000..5061c7c
+--- /dev/null
++++ b/tests/hidden_sort_times.rs
+@@ -0,0 +1,55 @@
++use filetime::{set_file_times, FileTime};
++use std::fs;
++use std::process::{Command, Output};
++use tempfile::TempDir;
++
++fn run(dir: &TempDir, args: &[&str]) -> Output {
++    Command::new(env!("CARGO_BIN_EXE_fd")).current_dir(dir.path()).args(["--color", "never", "--type", "f"]).args(args).output().unwrap()
++}
++fn lines(output: &Output) -> Vec<String> {
++    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
++    String::from_utf8(output.stdout.clone()).unwrap().lines().map(str::to_owned).collect()
++}
++fn timed_file(dir: &TempDir, name: &str, accessed: i64, modified: i64) {
++    let path = dir.path().join(name);
++    fs::write(&path, b"x").unwrap();
++    set_file_times(path, FileTime::from_unix_time(accessed, 0), FileTime::from_unix_time(modified, 0)).unwrap();
++}
++
++#[test]
++fn sort_modified_orders_oldest_first() {
++    let dir = TempDir::new().unwrap();
++    timed_file(&dir, "new", 50, 300); timed_file(&dir, "old", 50, 100); timed_file(&dir, "middle", 50, 200);
++    assert_eq!(lines(&run(&dir, &["--sort", "modified"])), ["old", "middle", "new"]);
++}
++
++#[test]
++fn sort_accessed_orders_oldest_first() {
++    let dir = TempDir::new().unwrap();
++    timed_file(&dir, "new", 300, 50); timed_file(&dir, "old", 100, 50); timed_file(&dir, "middle", 200, 50);
++    assert_eq!(lines(&run(&dir, &["--sort", "accessed"])), ["old", "middle", "new"]);
++}
++
++#[test]
++fn sort_modified_breaks_timestamp_ties_by_path() {
++    let dir = TempDir::new().unwrap();
++    timed_file(&dir, "z", 10, 42); timed_file(&dir, "a", 20, 42); timed_file(&dir, "m", 30, 42);
++    assert_eq!(lines(&run(&dir, &["--sort", "modified"])), ["a", "m", "z"]);
++}
++
++#[test]
++fn sort_accessed_breaks_timestamp_ties_by_path() {
++    let dir = TempDir::new().unwrap();
++    timed_file(&dir, "z", 42, 10); timed_file(&dir, "a", 42, 20); timed_file(&dir, "m", 42, 30);
++    assert_eq!(lines(&run(&dir, &["--sort", "accessed"])), ["a", "m", "z"]);
++}
++
++#[test]
++fn sort_created_is_deterministic_across_threads() {
++    let dir = TempDir::new().unwrap();
++    for index in 0..24 { fs::write(dir.path().join(format!("file-{index:02}")), b"x").unwrap(); }
++    let first = lines(&run(&dir, &["--threads", "1", "--sort", "created"]));
++    let second = lines(&run(&dir, &["--threads", "8", "--sort", "created"]));
++    assert_eq!(first, second);
++    assert_eq!(first.len(), 24);
++}

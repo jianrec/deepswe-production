@@ -1,0 +1,738 @@
+diff --git a/tests/hidden/computed.basic.test.ts b/tests/hidden/computed.basic.test.ts
+new file mode 100644
+index 0000000..0dbdb4e
+--- /dev/null
++++ b/tests/hidden/computed.basic.test.ts
+@@ -0,0 +1,88 @@
++import { expect, it, vi } from 'vitest'
++import { computed } from 'zustand/middleware'
++import { createStore } from 'zustand/vanilla'
++
++type CounterState = {
++  count: number
++  label: string
++  increment: () => void
++}
++
++type CounterComputed = {
++  doubled: number
++  summary: string
++}
++
++const createCounterStore = () =>
++  createStore(
++    computed<CounterState, CounterComputed>(
++      (set) => ({
++        count: 1,
++        label: 'one',
++        increment: () => set((state) => ({ count: state.count + 1 })),
++      }),
++      (state) => ({
++        doubled: state.count * 2,
++        summary: `${state.label}:${state.count}`,
++      }),
++    ),
++  )
++
++it('computed exports middleware and exposes initial computed values', () => {
++  const store = createCounterStore()
++  expect(store.getState()).toMatchObject({ doubled: 2, summary: 'one:1' })
++})
++
++it('computed recomputes after an initializer action', () => {
++  const store = createCounterStore()
++  store.getState().increment()
++  expect(store.getState()).toMatchObject({ count: 2, doubled: 4 })
++})
++
++it('computed recomputes after an external partial setState', () => {
++  const store = createCounterStore()
++  store.setState({ count: 4 })
++  expect(store.getState()).toMatchObject({ count: 4, doubled: 8 })
++})
++
++it('computed recomputes after an external functional setState', () => {
++  const store = createCounterStore()
++  store.setState((state) => ({ count: state.count + 4 }))
++  expect(store.getState()).toMatchObject({ count: 5, doubled: 10 })
++})
++
++it('computed overwrites a direct partial write to a computed key', () => {
++  const store = createCounterStore()
++  ;(store.setState as (state: object) => void)({ count: 3, doubled: 999 })
++  expect(store.getState()).toMatchObject({ count: 3, doubled: 6 })
++})
++
++it('computed overwrites a direct functional write to a computed key', () => {
++  const store = createCounterStore()
++  ;(store.setState as (state: (value: object) => object) => void)(() => ({
++    count: 6,
++    summary: 'forged',
++  }))
++  expect(store.getState()).toMatchObject({ count: 6, summary: 'one:6' })
++})
++
++it('computed re-merges computed keys for replace true', () => {
++  const store = createCounterStore()
++  ;(store.setState as (state: object, replace: true) => void)(
++    { count: 7, label: 'seven', increment: vi.fn(), doubled: -1 },
++    true,
++  )
++  expect(store.getState()).toMatchObject({
++    count: 7,
++    label: 'seven',
++    doubled: 14,
++    summary: 'seven:7',
++  })
++})
++
++it('computed publishes every key returned by compute', () => {
++  const store = createCounterStore()
++  store.setState({ count: 9, label: 'nine' })
++  expect(store.getState().doubled).toBe(18)
++  expect(store.getState().summary).toBe('nine:9')
++})
+diff --git a/tests/hidden/computed.initial-state.test.ts b/tests/hidden/computed.initial-state.test.ts
+new file mode 100644
+index 0000000..a6f4f96
+--- /dev/null
++++ b/tests/hidden/computed.initial-state.test.ts
+@@ -0,0 +1,49 @@
++import { expect, it } from 'vitest'
++import { computed } from 'zustand/middleware'
++import { createStore } from 'zustand/vanilla'
++
++it('computed includes derived values in getInitialState', () => {
++  const store = createStore(
++    computed(
++      () => ({ count: 2 }),
++      (state) => ({ doubled: state.count * 2 }),
++    ),
++  )
++  expect(store.getInitialState()).toMatchObject({ count: 2, doubled: 4 })
++})
++
++it('computed getInitialState remains unchanged after updates', () => {
++  const store = createStore(
++    computed(
++      () => ({ count: 2 }),
++      (state) => ({ doubled: state.count * 2 }),
++    ),
++  )
++  store.setState({ count: 8 })
++  expect(store.getInitialState()).toMatchObject({ count: 2, doubled: 4 })
++  expect(store.getState()).toMatchObject({ count: 8, doubled: 16 })
++})
++
++it('computed getInitialState retains the initial computed reference', () => {
++  const store = createStore(
++    computed(
++      () => ({ count: 1 }),
++      (state) => ({ record: { count: state.count } }),
++    ),
++  )
++  const initialRecord = store.getInitialState().record
++  store.setState({ count: 2 })
++  expect(store.getInitialState().record).toBe(initialRecord)
++  expect(store.getState().record).not.toBe(initialRecord)
++})
++
++it('computed initial state overwrites initializer-provided computed keys', () => {
++  const store = createStore(
++    computed(
++      () => ({ count: 3, doubled: 999 }),
++      (state) => ({ doubled: state.count * 2 }),
++    ),
++  )
++  expect(store.getInitialState().doubled).toBe(6)
++  expect(store.getState().doubled).toBe(6)
++})
+diff --git a/tests/hidden/computed.integration.test.ts b/tests/hidden/computed.integration.test.ts
+new file mode 100644
+index 0000000..ac96e82
+--- /dev/null
++++ b/tests/hidden/computed.integration.test.ts
+@@ -0,0 +1,112 @@
++import { expect, it, vi } from 'vitest'
++import { combine, computed, devtools, subscribeWithSelector } from 'zustand/middleware'
++import { immer } from 'zustand/middleware/immer'
++import { createStore } from 'zustand/vanilla'
++
++it('computed composes outside immer', () => {
++  const store = createStore(
++    computed(
++      immer<{ count: number; increment: () => void }>((set) => ({
++        count: 1,
++        increment: () => set((state) => void state.count++),
++      })),
++      (state) => ({ doubled: state.count * 2 }),
++    ),
++  )
++  store.getState().increment()
++  expect(store.getState().doubled).toBe(4)
++})
++
++it('computed composes inside immer', () => {
++  const store = createStore(
++    immer(
++      computed(
++        (set) => ({
++          count: 1,
++          increment: () => set((state) => ({ count: state.count + 1 })),
++        }),
++        (state) => ({ doubled: state.count * 2 }),
++      ),
++    ),
++  )
++  store.getState().increment()
++  expect(store.getState().doubled).toBe(4)
++})
++
++it('computed composes outside devtools', () => {
++  const store = createStore(
++    computed(
++      devtools(() => ({ count: 2 }), { name: 'computed-outer' }),
++      (state) => ({ doubled: state.count * 2 }),
++    ),
++  )
++  store.setState({ count: 3 })
++  expect(store.getState().doubled).toBe(6)
++})
++
++it('computed composes inside devtools', () => {
++  const store = createStore(
++    devtools(
++      computed(
++        () => ({ count: 2 }),
++        (state) => ({ doubled: state.count * 2 }),
++      ),
++      { name: 'computed-inner' },
++    ),
++  )
++  store.setState({ count: 4 }, false, 'change')
++  expect(store.getState().doubled).toBe(8)
++})
++
++it('computed composes outside subscribeWithSelector', () => {
++  const store = createStore(
++    computed(
++      subscribeWithSelector(() => ({ count: 1, other: 0 })),
++      (state) => ({ doubled: state.count * 2 }),
++    ),
++  )
++  const listener = vi.fn()
++  store.subscribe((state) => state.doubled, listener)
++  store.setState({ count: 2 })
++  expect(listener).toHaveBeenCalledWith(4, 2)
++})
++
++it('computed composes inside subscribeWithSelector', () => {
++  const store = createStore(
++    subscribeWithSelector(
++      computed(
++        () => ({ count: 1, other: 0 }),
++        (state) => ({ doubled: state.count * 2 }),
++      ),
++    ),
++  )
++  const listener = vi.fn()
++  store.subscribe((state) => state.doubled, listener)
++  store.setState({ count: 3 })
++  expect(listener).toHaveBeenCalledTimes(1)
++  expect(listener).toHaveBeenCalledWith(6, 2)
++})
++
++it('computed composes outside combine', () => {
++  const store = createStore(
++    computed(
++      combine({ count: 1 }, (set) => ({
++        increment: () => set((state) => ({ count: state.count + 1 })),
++      })),
++      (state) => ({ doubled: state.count * 2 }),
++    ),
++  )
++  store.getState().increment()
++  expect(store.getState().doubled).toBe(4)
++})
++
++it('computed composes inside combine-produced state creators', () => {
++  const initializer = combine({ count: 1 }, (set) => ({
++    increment: () => set((state) => ({ count: state.count + 1 })),
++  }))
++  const store = createStore(
++    computed(initializer, (state) => ({ label: `count:${state.count}` })),
++  )
++  store.setState({ count: 5 })
++  expect(store.getState().label).toBe('count:5')
++})
+diff --git a/tests/hidden/computed.keys.test.ts b/tests/hidden/computed.keys.test.ts
+new file mode 100644
+index 0000000..7eb8edd
+--- /dev/null
++++ b/tests/hidden/computed.keys.test.ts
+@@ -0,0 +1,76 @@
++import { expect, it, vi } from 'vitest'
++import { computed } from 'zustand/middleware'
++import { createStore } from 'zustand/vanilla'
++
++type State = { count: number; name: string; token: object }
++type Derived = { doubled: number }
++
++const createKeyedStore = (compute = vi.fn((state: State) => ({ doubled: state.count * 2 }))) => {
++  const store = createStore(
++    computed<State, Derived>(
++      () => ({ count: 1, name: 'one', token: {} }),
++      compute,
++      { keys: ['count' as never] },
++    ),
++  )
++  return { compute, store }
++}
++
++it('computed keys option computes the initial value', () => {
++  const { compute, store } = createKeyedStore()
++  expect(store.getState().doubled).toBe(2)
++  expect(compute).toHaveBeenCalledTimes(1)
++})
++
++it('computed keys option skips an unrelated base-state update', () => {
++  const { compute, store } = createKeyedStore()
++  store.setState({ name: 'changed' })
++  expect(compute).toHaveBeenCalledTimes(1)
++  expect(store.getState().doubled).toBe(2)
++})
++
++it('computed keys option recomputes a listed base-state update', () => {
++  const { compute, store } = createKeyedStore()
++  store.setState({ count: 3 })
++  expect(compute).toHaveBeenCalledTimes(2)
++  expect(store.getState().doubled).toBe(6)
++})
++
++it('computed keys compare listed values with Object.is', () => {
++  const { compute, store } = createKeyedStore()
++  store.setState({ count: 1 })
++  expect(compute).toHaveBeenCalledTimes(1)
++})
++
++it('computed keys detect changed object references', () => {
++  const compute = vi.fn((state: State) => ({ doubled: state.count * 2 }))
++  const store = createStore(
++    computed<State, Derived>(
++      () => ({ count: 1, name: 'one', token: {} }),
++      compute,
++      { keys: ['token' as never] },
++    ),
++  )
++  store.setState({ token: {} })
++  expect(compute).toHaveBeenCalledTimes(2)
++})
++
++it('computed keys support multiple relevant base-state keys', () => {
++  const compute = vi.fn((state: State) => ({ doubled: state.count * 2 }))
++  const store = createStore(
++    computed<State, Derived>(
++      () => ({ count: 1, name: 'one', token: {} }),
++      compute,
++      { keys: ['count' as never, 'name' as never] },
++    ),
++  )
++  store.setState({ name: 'two' })
++  store.setState({ count: 2 })
++  expect(compute).toHaveBeenCalledTimes(3)
++})
++
++it('computed keys cannot allow a forged computed value to survive', () => {
++  const { store } = createKeyedStore()
++  ;(store.setState as (state: object) => void)({ doubled: 500 })
++  expect(store.getState().doubled).toBe(2)
++})
+diff --git a/tests/hidden/computed.notifications.test.ts b/tests/hidden/computed.notifications.test.ts
+new file mode 100644
+index 0000000..013c485
+--- /dev/null
++++ b/tests/hidden/computed.notifications.test.ts
+@@ -0,0 +1,90 @@
++import { expect, it, vi } from 'vitest'
++import { computed } from 'zustand/middleware'
++import { createStore } from 'zustand/vanilla'
++
++type State = { count: number; other: number; increment: () => void }
++type Derived = { record: { parity: number }; doubled: number }
++
++const createNotificationStore = (equalityFn?: (a: unknown, b: unknown) => boolean) =>
++  createStore(
++    computed<State, Derived>(
++      (set) => ({
++        count: 0,
++        other: 0,
++        increment: () => set((state) => ({ count: state.count + 1 })),
++      }),
++      (state) => ({
++        record: { parity: state.count % 2 },
++        doubled: state.count * 2,
++      }),
++      equalityFn ? { equalityFn } : undefined,
++    ),
++  )
++
++it('computed notifies exactly once for external setState', () => {
++  const store = createNotificationStore()
++  const listener = vi.fn()
++  store.subscribe(listener)
++  store.setState({ count: 1 })
++  expect(listener).toHaveBeenCalledTimes(1)
++})
++
++it('computed notifies exactly once for an initializer action', () => {
++  const store = createNotificationStore()
++  const listener = vi.fn()
++  store.subscribe(listener)
++  store.getState().increment()
++  expect(listener).toHaveBeenCalledTimes(1)
++})
++
++it('computed notifies exactly once for replace true', () => {
++  const store = createNotificationStore()
++  const listener = vi.fn()
++  store.subscribe(listener)
++  ;(store.setState as (state: State, replace: true) => void)(
++    { count: 2, other: 1, increment: vi.fn() },
++    true,
++  )
++  expect(listener).toHaveBeenCalledTimes(1)
++})
++
++it('computed subscribers receive the final computed state', () => {
++  const store = createNotificationStore()
++  const states: Array<ReturnType<typeof store.getState>> = []
++  store.subscribe((state) => states.push(state))
++  store.setState({ count: 3 })
++  expect(states).toHaveLength(1)
++  expect(states[0]).toMatchObject({ count: 3, doubled: 6 })
++})
++
++it('computed subscribers receive the prior computed state', () => {
++  const store = createNotificationStore()
++  const previousStates: Array<ReturnType<typeof store.getState>> = []
++  store.subscribe((_state, previousState) => previousStates.push(previousState))
++  store.setState({ count: 2 })
++  expect(previousStates).toHaveLength(1)
++  expect(previousStates[0]).toMatchObject({ count: 0, doubled: 0 })
++})
++
++it('computed preserves each equal value with a custom equality function', () => {
++  const store = createNotificationStore((left, right) =>
++    JSON.stringify(left) === JSON.stringify(right),
++  )
++  const initialRecord = store.getState().record
++  store.setState({ count: 2 })
++  expect(store.getState().record).toBe(initialRecord)
++  expect(store.getState().doubled).toBe(4)
++})
++
++it('computed defaults to Object.is for value memoization', () => {
++  const stableRecord = { parity: 0 }
++  const store = createStore(
++    computed(
++      () => ({ count: 0, other: 0 }),
++      (state) => ({ stableRecord, doubled: state.count * 2 }),
++    ),
++  )
++  const initialRecord = store.getState().stableRecord
++  store.setState({ other: 1 })
++  expect(store.getState().stableRecord).toBe(initialRecord)
++})
+diff --git a/tests/hidden/computed.persistence.test.ts b/tests/hidden/computed.persistence.test.ts
+new file mode 100644
+index 0000000..4572a0e
+--- /dev/null
++++ b/tests/hidden/computed.persistence.test.ts
+@@ -0,0 +1,86 @@
++import { expect, it } from 'vitest'
++import { computed, createJSONStorage, persist } from 'zustand/middleware'
++import { createStore } from 'zustand/vanilla'
++
++const createMemoryStorage = () => {
++  const values = new Map<string, string>()
++  return {
++    getItem: (name: string) => values.get(name) ?? null,
++    setItem: (name: string, value: string) => void values.set(name, value),
++    removeItem: (name: string) => void values.delete(name),
++    read: (name: string) => values.get(name),
++  }
++}
++
++it('computed outside persist excludes computed keys by default', () => {
++  const memory = createMemoryStorage()
++  const store = createStore(
++    computed(
++      persist(() => ({ count: 1 }), {
++        name: 'outer-computed',
++        storage: createJSONStorage(() => memory),
++      }),
++      (state) => ({ doubled: state.count * 2 }),
++    ),
++  )
++  store.setState({ count: 2 })
++  const persisted = JSON.parse(memory.read('outer-computed') as string)
++  expect(persisted.state).toEqual({ count: 2 })
++})
++
++it('computed inside persist excludes computed keys by default', () => {
++  const memory = createMemoryStorage()
++  const store = createStore(
++    persist(
++      computed(
++        () => ({ count: 1 }),
++        (state) => ({ doubled: state.count * 2 }),
++      ),
++      {
++        name: 'inner-computed',
++        storage: createJSONStorage(() => memory),
++      },
++    ),
++  )
++  store.setState({ count: 3 })
++  const persisted = JSON.parse(memory.read('inner-computed') as string)
++  expect(persisted.state).toEqual({ count: 3 })
++})
++
++it('computed persistence includes a computed key when partialize selects it', () => {
++  const memory = createMemoryStorage()
++  const store = createStore(
++    persist(
++      computed(
++        () => ({ count: 1 }),
++        (state) => ({ doubled: state.count * 2 }),
++      ),
++      {
++        name: 'explicit-computed',
++        storage: createJSONStorage(() => memory),
++        partialize: (state) => ({ count: state.count, doubled: state.doubled }),
++      },
++    ),
++  )
++  store.setState({ count: 4 })
++  const persisted = JSON.parse(memory.read('explicit-computed') as string)
++  expect(persisted.state).toEqual({ count: 4, doubled: 8 })
++})
++
++it('computed recomputes hydrated persisted base state', () => {
++  const memory = createMemoryStorage()
++  memory.setItem(
++    'hydrated-computed',
++    JSON.stringify({ state: { count: 5 }, version: 0 }),
++  )
++  const store = createStore(
++    computed(
++      persist(() => ({ count: 1 }), {
++        name: 'hydrated-computed',
++        storage: createJSONStorage(() => memory),
++      }),
++      (state) => ({ doubled: state.count * 2 }),
++    ),
++  )
++  expect(store.getState()).toMatchObject({ count: 5, doubled: 10 })
++})
+diff --git a/tests/hidden/computed.react.test.tsx b/tests/hidden/computed.react.test.tsx
+new file mode 100644
+index 0000000..7c2e8ee
+--- /dev/null
++++ b/tests/hidden/computed.react.test.tsx
+@@ -0,0 +1,116 @@
++import { StrictMode, useState } from 'react'
++import { act, fireEvent, render, screen } from '@testing-library/react'
++import { renderToString } from 'react-dom/server'
++import { expect, it, vi } from 'vitest'
++import { create, useComputed } from 'zustand'
++import { createStore } from 'zustand/vanilla'
++
++it('useComputed is importable from zustand and derives store state', () => {
++  const store = createStore(() => ({ count: 2 }))
++  const Component = () => <div>{useComputed(store, (state) => state.count * 3)}</div>
++  render(<Component />)
++  expect(screen.getByText('6')).toBeInTheDocument()
++})
++
++it('useComputed updates when its derived primitive changes', () => {
++  const store = createStore(() => ({ count: 1 }))
++  const Component = () => <div>{useComputed(store, (state) => state.count * 2)}</div>
++  render(<Component />)
++  act(() => store.setState({ count: 4 }))
++  expect(screen.getByText('8')).toBeInTheDocument()
++})
++
++it('useComputed defaults to shallow equality for object outputs', () => {
++  const store = createStore(() => ({ count: 0, other: 0 }))
++  let renders = 0
++  const Component = () => {
++    const value = useComputed(store, (state) => ({ parity: state.count % 2 }))
++    renders++
++    return <div>{value.parity}</div>
++  }
++  render(<Component />)
++  act(() => store.setState({ count: 2, other: 1 }))
++  expect(renders).toBe(1)
++})
++
++it('useComputed re-renders when a shallow object field changes', () => {
++  const store = createStore(() => ({ count: 0 }))
++  let renders = 0
++  const Component = () => {
++    const value = useComputed(store, (state) => ({ parity: state.count % 2 }))
++    renders++
++    return <div>{value.parity}</div>
++  }
++  render(<Component />)
++  act(() => store.setState({ count: 1 }))
++  expect(renders).toBe(2)
++  expect(screen.getByText('1')).toBeInTheDocument()
++})
++
++it('useComputed honors a custom equality function', () => {
++  const store = createStore(() => ({ count: 0 }))
++  let renders = 0
++  const Component = () => {
++    const count = useComputed(store, (state) => state.count, () => true)
++    renders++
++    return <div>{count}</div>
++  }
++  render(<Component />)
++  act(() => store.setState({ count: 1 }))
++  expect(renders).toBe(1)
++  expect(screen.getByText('0')).toBeInTheDocument()
++})
++
++it('useComputed accepts a bound store api', () => {
++  const useBoundStore = create(() => ({ count: 3 }))
++  const Component = () => <div>{useComputed(useBoundStore, (state) => state.count + 1)}</div>
++  render(<Component />)
++  expect(screen.getByText('4')).toBeInTheDocument()
++})
++
++it('useComputed updates when the compute closure changes', () => {
++  const store = createStore(() => ({ count: 2 }))
++  const Component = () => {
++    const [factor, setFactor] = useState(2)
++    const result = useComputed(store, (state) => state.count * factor)
++    return <button onClick={() => setFactor(3)}>{result}</button>
++  }
++  render(<Component />)
++  fireEvent.click(screen.getByRole('button'))
++  expect(screen.getByRole('button')).toHaveTextContent('6')
++})
++
++it('useComputed uses getInitialState for server rendering', () => {
++  const api = {
++    getState: () => ({ count: 9 }),
++    getInitialState: () => ({ count: 2 }),
++    subscribe: () => () => undefined,
++  }
++  const Component = () => <span>{useComputed(api, (state) => state.count)}</span>
++  expect(renderToString(<Component />)).toContain('2')
++})
++
++it('useComputed unsubscribes when the component unmounts', () => {
++  const unsubscribe = vi.fn()
++  const api = {
++    getState: () => ({ count: 1 }),
++    getInitialState: () => ({ count: 1 }),
++    subscribe: vi.fn(() => unsubscribe),
++  }
++  const Component = () => <div>{useComputed(api, (state) => state.count)}</div>
++  const result = render(<Component />)
++  expect(api.subscribe).toHaveBeenCalled()
++  result.unmount()
++  expect(unsubscribe).toHaveBeenCalledTimes(1)
++})
++
++it('useComputed remains usable in React StrictMode', () => {
++  const store = createStore(() => ({ count: 1 }))
++  const Component = () => <div>{useComputed(store, (state) => state.count + 4)}</div>
++  render(
++    <StrictMode>
++      <Component />
++    </StrictMode>,
++  )
++  expect(screen.getByText('5')).toBeInTheDocument()
++})
+diff --git a/tests/hidden/computed.types.test.tsx b/tests/hidden/computed.types.test.tsx
+new file mode 100644
+index 0000000..5384c42
+--- /dev/null
++++ b/tests/hidden/computed.types.test.tsx
+@@ -0,0 +1,73 @@
++import { expect, expectTypeOf, it } from 'vitest'
++import { useComputed } from 'zustand'
++import type { ExtractState, StateCreator } from 'zustand'
++import { computed } from 'zustand/middleware'
++import type { ComputedOptions } from 'zustand/middleware'
++import { createStore } from 'zustand/vanilla'
++
++type Base = { count: number; name: string }
++type Derived = { doubled: number; display: string }
++
++const initializer: StateCreator<
++  Base,
++  [['zustand/computed', Derived]],
++  [],
++  Base
++> = () => ({ count: 1, name: 'one' })
++
++const store = createStore(
++  computed<Base, Derived>(initializer, (state) => ({
++    doubled: state.count * 2,
++    display: `${state.name}:${state.count}`,
++  })),
++)
++
++it('computed types expose computed keys through getState', () => {
++  expectTypeOf(store.getState().doubled).toEqualTypeOf<number>()
++  expectTypeOf(store.getState().display).toEqualTypeOf<string>()
++  expect(store).toBeDefined()
++})
++
++it('computed types expose computed keys through getInitialState', () => {
++  expectTypeOf(store.getInitialState().doubled).toEqualTypeOf<number>()
++  expectTypeOf(store.getInitialState().display).toEqualTypeOf<string>()
++  expect(store).toBeDefined()
++})
++
++it('computed types expose computed keys to subscribe listeners', () => {
++  store.subscribe((state, previousState) => {
++    expectTypeOf(state.doubled).toEqualTypeOf<number>()
++    expectTypeOf(previousState.display).toEqualTypeOf<string>()
++  })
++  expect(store).toBeDefined()
++})
++
++it('computed preserves usable setState overloads for base state', () => {
++  store.setState({ count: 3 })
++  store.setState((state) => ({ name: state.name.toUpperCase() }))
++  expect(store.getState().doubled).toBe(6)
++})
++
++it('ComputedOptions exposes equalityFn and keys', () => {
++  const options: ComputedOptions<Derived> = {
++    equalityFn: (left, right) => Object.is(left, right),
++    keys: ['doubled'],
++  }
++  expectTypeOf(options).toMatchTypeOf<ComputedOptions<Derived>>()
++  expect(options.keys).toEqual(['doubled'])
++})
++
++it('useComputed infers state and output from the store api', () => {
++  const Component = () => {
++    const result = useComputed(store, (state) => state.display.length)
++    expectTypeOf(result).toEqualTypeOf<number>()
++    return <>{result}</>
++  }
++  expect(Component).toBeDefined()
++})
++
++it('computed mutator changes ExtractState to include derived keys', () => {
++  type StoreState = ExtractState<typeof store>
++  expectTypeOf<StoreState>().toExtend<Base & Derived>()
++  expect(store).toBeDefined()
++})

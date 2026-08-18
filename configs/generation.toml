@@ -1,0 +1,51 @@
+[dataset]
+count = 500
+languages = ["typescript", "go", "python", "javascript", "rust"]
+min_stars = 1000
+preferred_stars = 5000
+network_for_authoring = true
+network_for_verifier = false
+
+[models]
+strong_model = "claude-opus-4-8"
+strong_model_runtime = "packy-anthropic-messages"
+hidden_test_model = "gpt-5.6-sol"
+hidden_test_provider = "packy-responses"
+
+[task_shape]
+min_source_files = 7
+max_source_files = 16
+min_changed_lines = 500
+max_changed_lines = 1500
+min_pr_chain_stages = 3
+max_pr_chain_stages = 5
+min_f2p = 40
+max_f2p = 150
+min_p2p = 100
+max_p2p = 1500
+min_prompt_chars = 1200
+max_prompt_chars = 6000
+min_modules = 3
+
+[difficulty]
+# Calibrated against the official DeepSWE report in ../DeepSWE全面调研报告.md.
+official_reference_added_lines_mean = 668
+official_reference_changed_files_mean = 7.4
+official_prompt_chars_mean = 2158
+official_agent_wall_time_limit_sec = 9000
+minimum_composite_score = 1.0
+target_composite_score = 1.25
+require_exploration = true
+require_multi_round_validation = true
+require_cross_module_integration = true
+require_nontrivial_regression_risk = true
+
+[qa]
+nop_trials = 3
+oracle_trials = 3
+mutant_trials = 4
+max_mutant_trials = 5
+
+[rollout]
+enabled = false
+reason = "Task generation phase only; do not collect solving trajectories."

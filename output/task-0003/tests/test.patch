@@ -1,0 +1,818 @@
+diff --git a/tests/hidden_spend_budget/test_budget_defaults_and_cli.py b/tests/hidden_spend_budget/test_budget_defaults_and_cli.py
+new file mode 100644
+index 0000000..48d45a7
+--- /dev/null
++++ b/tests/hidden_spend_budget/test_budget_defaults_and_cli.py
+@@ -0,0 +1,91 @@
++import shutil
++import subprocess
++import sys
++
++from hermes_cli.config import DEFAULT_CONFIG
++
++
++def _run_config_set(tmp_path, key, value):
++    section, option = key.split(".", 1)
++    assert option in DEFAULT_CONFIG.get(section, {})
++    executable = shutil.which("hermes")
++    assert executable is not None, "the repository CLI entry point must be installed"
++    result = subprocess.run(
++        [executable, "config", "set", key, value],
++        cwd=str(tmp_path),
++        env={"HOME": str(tmp_path), "PATH": shutil.os.environ.get("PATH", "")},
++        capture_output=True,
++        text=True,
++        timeout=30,
++        check=False,
++    )
++    assert result.returncode == 0, result.stdout + result.stderr
++
++
++def test_budget_defaults_section_has_exact_contract_values():
++    assert DEFAULT_CONFIG["budget"] == {
++        "enabled": False,
++        "session_limit_usd": None,
++        "daily_limit_usd": None,
++        "total_limit_usd": None,
++        "warn_ratio": 0.8,
++        "enforce": False,
++    }
++
++
++def test_budget_enabled_defaults_false():
++    assert DEFAULT_CONFIG["budget"]["enabled"] is False
++
++
++def test_budget_limit_defaults_are_none():
++    budget = DEFAULT_CONFIG["budget"]
++    assert budget["session_limit_usd"] is None
++    assert budget["daily_limit_usd"] is None
++    assert budget["total_limit_usd"] is None
++
++
++def test_cli_sets_session_budget_limit(tmp_path):
++    _run_config_set(tmp_path, "budget.session_limit_usd", "12.5")
++
++
++def test_cli_sets_daily_budget_limit(tmp_path):
++    _run_config_set(tmp_path, "budget.daily_limit_usd", "20")
++
++
++def test_cli_sets_total_budget_limit(tmp_path):
++    _run_config_set(tmp_path, "budget.total_limit_usd", "100")
++
++
++def test_cli_sets_budget_warn_ratio(tmp_path):
++    _run_config_set(tmp_path, "budget.warn_ratio", "0.7")
++
++
++def test_cli_sets_budget_enforcement_flag(tmp_path):
++    _run_config_set(tmp_path, "budget.enforce", "true")
++
++
++def test_run_agent_help_exposes_budget_limit_flag():
++    result = subprocess.run(
++        [sys.executable, "run_agent.py", "--help"],
++        capture_output=True,
++        text=True,
++        timeout=30,
++        check=False,
++    )
++    assert result.returncode == 0, result.stderr
++    combined = result.stdout + result.stderr
++    assert "--budget-limit" in combined
++
++
++def test_budget_limit_help_identifies_usd_value():
++    assert "session_limit_usd" in DEFAULT_CONFIG.get("budget", {})
++    result = subprocess.run(
++        [sys.executable, "run_agent.py", "--help"],
++        capture_output=True,
++        text=True,
++        timeout=30,
++        check=False,
++    )
++    combined = result.stdout + result.stderr
++    line = next(line for line in combined.splitlines() if "--budget-limit" in line)
++    assert "USD" in line.upper() or "DOLLAR" in line.upper()
+diff --git a/tests/hidden_spend_budget/test_budget_formatting.py b/tests/hidden_spend_budget/test_budget_formatting.py
+new file mode 100644
+index 0000000..f2e5f92
+--- /dev/null
++++ b/tests/hidden_spend_budget/test_budget_formatting.py
+@@ -0,0 +1,41 @@
++import importlib
++
++
++def _render(scope, spent, limit, ratio, remaining, warned, exceeded, *, color=False):
++    module = importlib.import_module("agent.spend_budget")
++    status = module.BudgetStatus(scope, spent, limit, ratio, remaining, warned, exceeded)
++    return module.format_budget_status(status, use_color=color)
++
++
++def test_format_budget_status_contains_scope_spent_limit_and_remaining():
++    rendered = _render("session", 2.5, 10.0, 0.25, 7.5, False, False)
++    assert "session" in rendered.lower()
++    assert "2.50" in rendered
++    assert "10.00" in rendered
++    assert "7.50" in rendered
++
++
++def test_format_budget_status_without_color_has_no_ansi_sequences():
++    rendered = _render("daily", 8.0, 10.0, 0.8, 2.0, True, False)
++    assert "\x1b[" not in rendered
++
++
++def test_format_budget_warned_status_is_compact():
++    rendered = _render("daily", 8.25, 10.0, 0.825, 1.75, True, False)
++    assert "\n" not in rendered
++    assert len(rendered) <= 120
++    assert "1.75" in rendered
++
++
++def test_format_budget_exceeded_status_shows_zero_remaining():
++    rendered = _render("total", 12.0, 10.0, 1.2, 0.0, True, True)
++    assert "total" in rendered.lower()
++    assert "0.00" in rendered
++
++
++def test_format_budget_color_mode_preserves_all_amount_text():
++    plain = _render("session", 9.0, 10.0, 0.9, 1.0, True, False, color=False)
++    colored = _render("session", 9.0, 10.0, 0.9, 1.0, True, False, color=True)
++    for fragment in ("9.00", "10.00", "1.00"):
++        assert fragment in plain
++        assert fragment in colored
+diff --git a/tests/hidden_spend_budget/test_budget_integration_adapters.py b/tests/hidden_spend_budget/test_budget_integration_adapters.py
+new file mode 100644
+index 0000000..00fadc6
+--- /dev/null
++++ b/tests/hidden_spend_budget/test_budget_integration_adapters.py
+@@ -0,0 +1,60 @@
++import importlib
++from types import ModuleType
++
++
++def _module_references(module, target):
++    for value in vars(module).values():
++        if value is target:
++            return True
++        if isinstance(value, ModuleType) and getattr(value, target.__name__, None) is target:
++            return True
++    return False
++
++
++def test_credits_tracker_is_wired_to_turn_cost_helper():
++    credits = importlib.import_module("agent.credits_tracker")
++    credits._budget_tracker = None
++    credits._budget_tracker_key = None
++    config = {"budget": {"enabled": True, "session_limit_usd": 10.0}}
++    credits.record_turn_budget({"input_tokens": 1_000_000, "output_tokens": 0}, {"input_cost_per_million": 2.0, "output_cost_per_million": 0.0}, config)
++    status = credits.get_budget_tracker(config).snapshot()["session"]
++    assert status.spent_usd == 2.0
++
++
++def test_credits_tracker_is_wired_to_spend_budget_tracker():
++    credits = importlib.import_module("agent.credits_tracker")
++    credits._budget_tracker = None
++    credits._budget_tracker_key = None
++    config = {"budget": {"enabled": True, "session_limit_usd": 5.0}}
++    events = credits.record_turn_budget({"input_tokens": 1_000_000}, {"input_cost_per_million": 5.0}, config)
++    assert [event.kind for event in events] == ["warn", "exceeded"]
++    assert credits.get_budget_tracker(config).is_exceeded("session") is True
++
++
++def test_billing_view_is_wired_to_budget_status_formatter():
++    budget = importlib.import_module("agent.spend_budget")
++    billing_view = importlib.import_module("agent.billing_view")
++    tracker = budget.SpendBudgetTracker([budget.BudgetLimit("session", 10.0)])
++    tracker.record_usage(scope="session", cost_usd=2.0)
++    lines = billing_view.build_budget_lines(tracker, use_color=False)
++    assert len(lines) == 1
++    assert "session" in lines[0].lower() and "2.00" in lines[0] and "10.00" in lines[0]
++
++
++def test_display_is_wired_to_budget_status_formatter():
++    budget = importlib.import_module("agent.spend_budget")
++    display = importlib.import_module("agent.display")
++    status = budget.BudgetStatus("session", 2.0, 10.0, 0.2, 8.0, False, False)
++    rendered = display.format_budget_display(status, use_color=False)
++    assert rendered == budget.format_budget_status(status, use_color=False)
++
++
++def test_gateway_runtime_footer_is_wired_to_budget_status_formatter():
++    credits = importlib.import_module("agent.credits_tracker")
++    footer = importlib.import_module("gateway.runtime_footer")
++    credits._budget_tracker = None
++    credits._budget_tracker_key = None
++    config = {"budget": {"enabled": True, "session_limit_usd": 10.0}}
++    rendered = footer.build_footer_line(user_config=config, platform_key=None, model=None, context_tokens=0, context_length=None)
++    assert "session" in rendered.lower()
++    assert "0.00" in rendered and "10.00" in rendered
+diff --git a/tests/hidden_spend_budget/test_budget_monitoring.py b/tests/hidden_spend_budget/test_budget_monitoring.py
+new file mode 100644
+index 0000000..f9a582d
+--- /dev/null
++++ b/tests/hidden_spend_budget/test_budget_monitoring.py
+@@ -0,0 +1,74 @@
++import importlib
++import json
++
++from agent.context_compressor import _redact_compaction_text
++
++
++def test_budget_threshold_event_constant_has_contract_value():
++    events = importlib.import_module("agent.monitoring.events")
++    assert events.BUDGET_THRESHOLD_EVENT == "budget.threshold"
++
++
++def test_budget_event_forms_exact_monitoring_payload_shape():
++    budget = importlib.import_module("agent.spend_budget")
++    event = budget.BudgetEvent("warn", "session", 8.0, 10.0, 0.8, 1234.5)
++    payload = {
++        "scope": event.scope,
++        "kind": event.kind,
++        "spent_usd": event.spent_usd,
++        "limit_usd": event.limit_usd,
++        "ratio": event.ratio,
++        "session_id": "session-123",
++        "ts": event.ts,
++    }
++    assert set(payload) == {
++        "scope", "kind", "spent_usd", "limit_usd", "ratio", "session_id", "ts"
++    }
++
++
++def test_budget_payload_amounts_survive_strict_redaction():
++    events = importlib.import_module("agent.monitoring.events")
++    payload = {
++        "event": events.BUDGET_THRESHOLD_EVENT,
++        "scope": "daily",
++        "kind": "exceeded",
++        "spent_usd": 12.75,
++        "limit_usd": 10.0,
++        "ratio": 1.275,
++        "session_id": "safe-session",
++        "ts": 1730000000.0,
++    }
++    decoded = json.loads(_redact_compaction_text(json.dumps(payload, sort_keys=True)))
++    assert decoded["spent_usd"] == 12.75
++    assert decoded["limit_usd"] == 10.0
++    assert decoded["ratio"] == 1.275
++    assert decoded["ts"] == 1730000000.0
++
++
++def test_budget_payload_redaction_removes_incidental_secret_but_keeps_amounts():
++    events = importlib.import_module("agent.monitoring.events")
++    secret = "sk-proj-" + "a" * 40
++    payload = {
++        "event": events.BUDGET_THRESHOLD_EVENT,
++        "scope": "total",
++        "kind": "warn",
++        "spent_usd": 4.0,
++        "limit_usd": 5.0,
++        "ratio": 0.8,
++        "session_id": "session-safe",
++        "ts": 100.0,
++        "diagnostic": secret,
++    }
++    redacted = _redact_compaction_text(json.dumps(payload, sort_keys=True))
++    assert secret not in redacted
++    decoded = json.loads(redacted)
++    assert decoded["spent_usd"] == 4.0
++    assert decoded["limit_usd"] == 5.0
++
++
++def test_budget_contract_payload_keys_contain_no_secret_fields():
++    events = importlib.import_module("agent.monitoring.events")
++    assert events.BUDGET_THRESHOLD_EVENT == "budget.threshold"
++    allowed = {"scope", "kind", "spent_usd", "limit_usd", "ratio", "session_id", "ts"}
++    forbidden = {"key", "token", "authorization", "password", "credential"}
++    assert all(not any(fragment in key.lower() for fragment in forbidden) for key in allowed)
+diff --git a/tests/hidden_spend_budget/test_spend_budget_api.py b/tests/hidden_spend_budget/test_spend_budget_api.py
+new file mode 100644
+index 0000000..745a35d
+--- /dev/null
++++ b/tests/hidden_spend_budget/test_spend_budget_api.py
+@@ -0,0 +1,82 @@
++from dataclasses import FrozenInstanceError, fields
++import importlib
++import inspect
++
++import pytest
++
++
++def _api():
++    module = importlib.import_module("agent.spend_budget")
++    return (
++        module.BudgetLimit,
++        module.BudgetStatus,
++        module.BudgetEvent,
++        module.SpendBudgetTracker,
++        module.parse_budget_config,
++        module.format_budget_status,
++    )
++
++
++def test_budget_limit_has_exact_public_fields_and_default():
++    BudgetLimit, _, _, _, _, _ = _api()
++    value = BudgetLimit(scope="session", limit_usd=10.0)
++    assert [field.name for field in fields(BudgetLimit)] == ["scope", "limit_usd", "warn_ratio"]
++    assert (value.scope, value.limit_usd, value.warn_ratio) == ("session", 10.0, 0.8)
++
++
++def test_budget_limit_is_frozen():
++    BudgetLimit, _, _, _, _, _ = _api()
++    value = BudgetLimit("daily", 5.0)
++    with pytest.raises(FrozenInstanceError):
++        value.limit_usd = 6.0
++
++
++def test_budget_status_has_exact_public_fields_and_is_frozen():
++    _, BudgetStatus, _, _, _, _ = _api()
++    value = BudgetStatus("total", 2.0, 8.0, 0.25, 6.0, False, False)
++    assert [field.name for field in fields(BudgetStatus)] == [
++        "scope", "spent_usd", "limit_usd", "ratio", "remaining_usd", "warned", "exceeded"
++    ]
++    with pytest.raises(FrozenInstanceError):
++        value.warned = True
++
++
++def test_budget_event_has_exact_public_fields_and_is_frozen():
++    _, _, BudgetEvent, _, _, _ = _api()
++    value = BudgetEvent("warn", "session", 8.0, 10.0, 0.8, 123.0)
++    assert [field.name for field in fields(BudgetEvent)] == [
++        "kind", "scope", "spent_usd", "limit_usd", "ratio", "ts"
++    ]
++    with pytest.raises(FrozenInstanceError):
++        value.kind = "exceeded"
++
++
++def test_tracker_constructor_signature_matches_contract():
++    _, _, _, SpendBudgetTracker, _, _ = _api()
++    signature = inspect.signature(SpendBudgetTracker)
++    assert list(signature.parameters) == ["limits", "clock"]
++    assert signature.parameters["clock"].kind is inspect.Parameter.KEYWORD_ONLY
++    assert signature.parameters["clock"].default is None
++
++
++def test_tracker_methods_match_keyword_contract():
++    _, _, _, SpendBudgetTracker, _, _ = _api()
++    record = inspect.signature(SpendBudgetTracker.record_usage)
++    assert list(record.parameters) == ["self", "scope", "cost_usd", "session_id"]
++    assert record.parameters["scope"].kind is inspect.Parameter.KEYWORD_ONLY
++    assert record.parameters["cost_usd"].kind is inspect.Parameter.KEYWORD_ONLY
++    assert record.parameters["session_id"].default is None
++    assert list(inspect.signature(SpendBudgetTracker.snapshot).parameters) == ["self"]
++    assert list(inspect.signature(SpendBudgetTracker.remaining).parameters) == ["self", "scope"]
++    assert list(inspect.signature(SpendBudgetTracker.is_exceeded).parameters) == ["self", "scope"]
++    assert list(inspect.signature(SpendBudgetTracker.reset).parameters) == ["self", "scope"]
++
++
++def test_parse_and_format_function_signatures_match_contract():
++    _, _, _, _, parse_budget_config, format_budget_status = _api()
++    parse_signature = inspect.signature(parse_budget_config)
++    assert list(parse_signature.parameters) == ["raw"]
++    format_signature = inspect.signature(format_budget_status)
++    assert list(format_signature.parameters) == ["status", "use_color"]
++    assert format_signature.parameters["use_color"].kind is inspect.Parameter.KEYWORD_ONLY
++    assert format_signature.parameters["use_color"].default is True
+diff --git a/tests/hidden_spend_budget/test_spend_budget_config.py b/tests/hidden_spend_budget/test_spend_budget_config.py
+new file mode 100644
+index 0000000..b51d882
+--- /dev/null
++++ b/tests/hidden_spend_budget/test_spend_budget_config.py
+@@ -0,0 +1,116 @@
++import importlib
++import logging
++
++
++def _symbols():
++    module = importlib.import_module("agent.spend_budget")
++    return module.BudgetLimit, module.parse_budget_config
++
++
++def test_parse_none_disables_budgets():
++    _, parse_budget_config = _symbols()
++    assert parse_budget_config(None) == []
++
++
++def test_parse_empty_mapping_disables_budgets():
++    _, parse_budget_config = _symbols()
++    assert parse_budget_config({}) == []
++
++
++def test_parse_disabled_mapping_ignores_configured_limits():
++    _, parse_budget_config = _symbols()
++    assert parse_budget_config({"budget": {"enabled": False, "session_limit_usd": 4.0}}) == []
++
++
++def test_parse_session_limit_uses_default_warn_ratio():
++    BudgetLimit, parse_budget_config = _symbols()
++    assert parse_budget_config({"budget": {"enabled": True, "session_limit_usd": 12.5}}) == [
++        BudgetLimit("session", 12.5, 0.8)
++    ]
++
++
++def test_parse_all_scopes_in_contract_order():
++    BudgetLimit, parse_budget_config = _symbols()
++    result = parse_budget_config({"budget": {
++        "enabled": True,
++        "session_limit_usd": 1.0,
++        "daily_limit_usd": 2.0,
++        "total_limit_usd": 3.0,
++    }})
++    assert result == [
++        BudgetLimit("session", 1.0, 0.8),
++        BudgetLimit("daily", 2.0, 0.8),
++        BudgetLimit("total", 3.0, 0.8),
++    ]
++
++
++def test_parse_custom_warn_ratio_applies_to_every_scope():
++    BudgetLimit, parse_budget_config = _symbols()
++    result = parse_budget_config({"budget": {
++        "enabled": True,
++        "session_limit_usd": 10,
++        "daily_limit_usd": 20,
++        "warn_ratio": 0.65,
++    }})
++    assert result == [BudgetLimit("session", 10.0, 0.65), BudgetLimit("daily", 20.0, 0.65)]
++
++
++def test_parse_unknown_budget_keys_yields_no_limits():
++    _, parse_budget_config = _symbols()
++    assert parse_budget_config({"budget": {"enabled": True, "weekly_limit_usd": 9.0}}) == []
++
++
++def test_parse_malformed_budget_section_returns_empty_and_logs(caplog):
++    _, parse_budget_config = _symbols()
++    with caplog.at_level(logging.WARNING):
++        result = parse_budget_config({"budget": "invalid"})
++    assert result == []
++    assert caplog.records
++
++
++def test_parse_negative_limit_ignores_only_bad_scope_and_logs(caplog):
++    BudgetLimit, parse_budget_config = _symbols()
++    with caplog.at_level(logging.WARNING):
++        result = parse_budget_config({"budget": {
++            "enabled": True,
++            "session_limit_usd": -1,
++            "daily_limit_usd": 4,
++        }})
++    assert result == [BudgetLimit("daily", 4.0, 0.8)]
++    assert any("session" in record.getMessage().lower() for record in caplog.records)
++
++
++def test_parse_non_numeric_limit_ignores_only_bad_scope_and_logs(caplog):
++    BudgetLimit, parse_budget_config = _symbols()
++    with caplog.at_level(logging.WARNING):
++        result = parse_budget_config({"budget": {
++            "enabled": True,
++            "session_limit_usd": "many",
++            "total_limit_usd": 7,
++        }})
++    assert result == [BudgetLimit("total", 7.0, 0.8)]
++    assert caplog.records
++
++
++def test_parse_non_finite_limits_are_ignored_and_logged(caplog):
++    _, parse_budget_config = _symbols()
++    with caplog.at_level(logging.WARNING):
++        result = parse_budget_config({"budget": {
++            "enabled": True,
++            "session_limit_usd": float("nan"),
++            "daily_limit_usd": float("inf"),
++        }})
++    assert result == []
++    assert caplog.records
++
++
++def test_parse_malformed_warn_ratio_disables_without_raising(caplog):
++    _, parse_budget_config = _symbols()
++    with caplog.at_level(logging.WARNING):
++        result = parse_budget_config({"budget": {
++            "enabled": True,
++            "session_limit_usd": 5,
++            "warn_ratio": "invalid",
++        }})
++    assert result == []
++    assert caplog.records
+diff --git a/tests/hidden_spend_budget/test_spend_budget_daily.py b/tests/hidden_spend_budget/test_spend_budget_daily.py
+new file mode 100644
+index 0000000..edd8598
+--- /dev/null
++++ b/tests/hidden_spend_budget/test_spend_budget_daily.py
+@@ -0,0 +1,102 @@
++from datetime import datetime
++import importlib
++import os
++import time
++
++import pytest
++
++
++class MutableClock:
++    def __init__(self, value):
++        self.value = value
++
++    def __call__(self):
++        return self.value
++
++
++@pytest.fixture(autouse=True)
++def utc_local_timezone():
++    previous = os.environ.get("TZ")
++    os.environ["TZ"] = "UTC"
++    if hasattr(time, "tzset"):
++        time.tzset()
++    yield
++    if previous is None:
++        os.environ.pop("TZ", None)
++    else:
++        os.environ["TZ"] = previous
++    if hasattr(time, "tzset"):
++        time.tzset()
++
++
++def _timestamp(year, month, day, hour, minute=0):
++    return datetime(year, month, day, hour, minute).timestamp()
++
++
++def _daily_tracker(clock, limit=10.0):
++    module = importlib.import_module("agent.spend_budget")
++    return module.SpendBudgetTracker([module.BudgetLimit("daily", limit)], clock=clock)
++
++
++def test_daily_does_not_reset_before_local_midnight():
++    clock = MutableClock(_timestamp(2025, 1, 1, 23, 50))
++    tracker = _daily_tracker(clock)
++    tracker.record_usage(scope="daily", cost_usd=3.0)
++    clock.value = _timestamp(2025, 1, 1, 23, 59)
++    assert tracker.record_usage(scope="daily", cost_usd=2.0) == []
++    assert tracker.snapshot()["daily"].spent_usd == pytest.approx(5.0)
++
++
++def test_daily_resets_when_clock_crosses_local_midnight():
++    clock = MutableClock(_timestamp(2025, 1, 1, 23, 59))
++    tracker = _daily_tracker(clock)
++    tracker.record_usage(scope="daily", cost_usd=3.0)
++    clock.value = _timestamp(2025, 1, 2, 0, 1)
++    events = tracker.record_usage(scope="daily", cost_usd=2.0)
++    assert [event.kind for event in events] == ["reset"]
++    assert tracker.snapshot()["daily"].spent_usd == pytest.approx(2.0)
++
++
++def test_daily_reset_event_reports_zeroed_status_and_injected_time():
++    clock = MutableClock(_timestamp(2025, 2, 2, 22, 0))
++    tracker = _daily_tracker(clock, limit=7.0)
++    tracker.record_usage(scope="daily", cost_usd=6.0)
++    clock.value = _timestamp(2025, 2, 3, 1, 0)
++    event = tracker.record_usage(scope="daily", cost_usd=0.0)[0]
++    assert (event.kind, event.scope) == ("reset", "daily")
++    assert event.spent_usd == 0.0
++    assert event.limit_usd == 7.0
++    assert event.ratio == 0.0
++    assert event.ts == clock.value
++
++
++def test_daily_reset_rearms_warn_and_exceeded_events():
++    clock = MutableClock(_timestamp(2025, 3, 1, 12, 0))
++    tracker = _daily_tracker(clock)
++    assert [event.kind for event in tracker.record_usage(scope="daily", cost_usd=10.0)] == [
++        "warn", "exceeded"
++    ]
++    clock.value = _timestamp(2025, 3, 2, 12, 0)
++    assert [event.kind for event in tracker.record_usage(scope="daily", cost_usd=10.0)] == [
++        "reset", "warn", "exceeded"
++    ]
++
++
++def test_session_scope_never_auto_resets_at_midnight():
++    module = importlib.import_module("agent.spend_budget")
++    clock = MutableClock(_timestamp(2025, 4, 1, 23, 59))
++    tracker = module.SpendBudgetTracker([module.BudgetLimit("session", 20.0)], clock=clock)
++    tracker.record_usage(scope="session", cost_usd=3.0)
++    clock.value = _timestamp(2025, 4, 3, 1, 0)
++    tracker.record_usage(scope="session", cost_usd=2.0)
++    assert tracker.snapshot()["session"].spent_usd == pytest.approx(5.0)
++
++
++def test_total_scope_never_auto_resets_at_midnight():
++    module = importlib.import_module("agent.spend_budget")
++    clock = MutableClock(_timestamp(2025, 5, 1, 23, 59))
++    tracker = module.SpendBudgetTracker([module.BudgetLimit("total", 20.0)], clock=clock)
++    tracker.record_usage(scope="total", cost_usd=4.0)
++    clock.value = _timestamp(2025, 6, 1, 1, 0)
++    tracker.record_usage(scope="total", cost_usd=1.0)
++    assert tracker.snapshot()["total"].spent_usd == pytest.approx(5.0)
+diff --git a/tests/hidden_spend_budget/test_spend_budget_tracker.py b/tests/hidden_spend_budget/test_spend_budget_tracker.py
+new file mode 100644
+index 0000000..6b681f2
+--- /dev/null
++++ b/tests/hidden_spend_budget/test_spend_budget_tracker.py
+@@ -0,0 +1,114 @@
++import importlib
++
++import pytest
++
++
++def _tracker(*limits, clock=None):
++    module = importlib.import_module("agent.spend_budget")
++    configured = [module.BudgetLimit(*limit) for limit in limits]
++    return module.SpendBudgetTracker(configured, clock=clock)
++
++
++def test_record_usage_accumulates_configured_scope():
++    tracker = _tracker(("session", 10.0))
++    assert tracker.record_usage(scope="session", cost_usd=2.5) == []
++    status = tracker.snapshot()["session"]
++    assert status.spent_usd == pytest.approx(2.5)
++    assert status.ratio == pytest.approx(0.25)
++    assert status.remaining_usd == pytest.approx(7.5)
++
++
++def test_record_usage_accumulates_multiple_turns():
++    tracker = _tracker(("session", 10.0))
++    tracker.record_usage(scope="session", cost_usd=1.25)
++    tracker.record_usage(scope="session", cost_usd=2.75)
++    assert tracker.snapshot()["session"].spent_usd == pytest.approx(4.0)
++
++
++def test_warn_event_fires_at_warn_threshold():
++    tracker = _tracker(("session", 10.0, 0.8), clock=lambda: 42.0)
++    events = tracker.record_usage(scope="session", cost_usd=8.0, session_id="s-1")
++    assert len(events) == 1
++    event = events[0]
++    assert (event.kind, event.scope, event.ts) == ("warn", "session", 42.0)
++    assert event.spent_usd == pytest.approx(8.0)
++    assert event.limit_usd == pytest.approx(10.0)
++    assert event.ratio == pytest.approx(0.8)
++
++
++def test_warn_event_is_one_shot_until_reset():
++    tracker = _tracker(("session", 10.0))
++    assert [event.kind for event in tracker.record_usage(scope="session", cost_usd=8.0)] == ["warn"]
++    assert tracker.record_usage(scope="session", cost_usd=0.5) == []
++
++
++def test_exceeded_event_fires_at_exact_limit():
++    tracker = _tracker(("session", 10.0))
++    tracker.record_usage(scope="session", cost_usd=8.0)
++    events = tracker.record_usage(scope="session", cost_usd=2.0)
++    assert [event.kind for event in events] == ["exceeded"]
++    assert events[0].ratio == pytest.approx(1.0)
++
++
++def test_single_turn_crossing_both_thresholds_emits_warn_then_exceeded():
++    tracker = _tracker(("total", 5.0), clock=lambda: 100.0)
++    events = tracker.record_usage(scope="total", cost_usd=6.0)
++    assert [event.kind for event in events] == ["warn", "exceeded"]
++    assert all(event.ts == 100.0 for event in events)
++
++
++def test_exceeded_event_is_one_shot_until_reset():
++    tracker = _tracker(("session", 1.0))
++    tracker.record_usage(scope="session", cost_usd=1.0)
++    assert tracker.record_usage(scope="session", cost_usd=3.0) == []
++    assert tracker.snapshot()["session"].spent_usd == pytest.approx(4.0)
++
++
++def test_snapshot_reports_independent_scopes():
++    tracker = _tracker(("session", 10.0), ("daily", 20.0), ("total", 30.0))
++    tracker.record_usage(scope="session", cost_usd=1.0)
++    tracker.record_usage(scope="daily", cost_usd=2.0)
++    tracker.record_usage(scope="total", cost_usd=3.0)
++    snapshot = tracker.snapshot()
++    assert set(snapshot) == {"session", "daily", "total"}
++    assert snapshot["session"].spent_usd == pytest.approx(1.0)
++    assert snapshot["daily"].spent_usd == pytest.approx(2.0)
++    assert snapshot["total"].spent_usd == pytest.approx(3.0)
++
++
++def test_remaining_clamps_to_zero_after_limit():
++    tracker = _tracker(("session", 4.0))
++    tracker.record_usage(scope="session", cost_usd=5.0)
++    assert tracker.remaining("session") == pytest.approx(0.0)
++
++
++def test_is_exceeded_reflects_current_accumulation():
++    tracker = _tracker(("session", 4.0))
++    assert tracker.is_exceeded("session") is False
++    tracker.record_usage(scope="session", cost_usd=4.0)
++    assert tracker.is_exceeded("session") is True
++
++
++def test_unconfigured_scope_is_ignored():
++    tracker = _tracker(("session", 5.0))
++    assert tracker.record_usage(scope="weekly", cost_usd=10.0) == []
++    assert tracker.remaining("weekly") is None
++    assert tracker.is_exceeded("weekly") is False
++    assert set(tracker.snapshot()) == {"session"}
++
++
++def test_zero_cost_does_not_emit_or_change_status():
++    tracker = _tracker(("session", 5.0))
++    assert tracker.record_usage(scope="session", cost_usd=0.0) == []
++    assert tracker.snapshot()["session"].spent_usd == 0.0
++
++
++def test_explicit_reset_clears_spend_and_one_shot_flags():
++    tracker = _tracker(("session", 10.0))
++    tracker.record_usage(scope="session", cost_usd=10.0)
++    tracker.reset("session")
++    status = tracker.snapshot()["session"]
++    assert status.spent_usd == 0.0
++    assert status.warned is False
++    assert status.exceeded is False
++    assert [event.kind for event in tracker.record_usage(scope="session", cost_usd=8.0)] == ["warn"]
+diff --git a/tests/hidden_spend_budget/test_turn_cost_usd.py b/tests/hidden_spend_budget/test_turn_cost_usd.py
+new file mode 100644
+index 0000000..1ce7542
+--- /dev/null
++++ b/tests/hidden_spend_budget/test_turn_cost_usd.py
+@@ -0,0 +1,84 @@
++from decimal import Decimal
++import importlib
++from types import SimpleNamespace
++
++import pytest
++
++
++def _pricing_api():
++    module = importlib.import_module("agent.usage_pricing")
++    return module.PricingEntry, module.turn_cost_usd
++
++
++def test_turn_cost_adds_input_and_output_costs_for_mappings():
++    _, turn_cost_usd = _pricing_api()
++    usage = {"input_tokens": 1_000_000, "output_tokens": 500_000}
++    pricing = {"input_cost_per_million": 2.0, "output_cost_per_million": 6.0}
++    assert turn_cost_usd(usage, pricing) == pytest.approx(5.0)
++
++
++def test_turn_cost_supports_attribute_usage_and_pricing_objects():
++    _, turn_cost_usd = _pricing_api()
++    usage = SimpleNamespace(input_tokens=250_000, output_tokens=100_000)
++    pricing = SimpleNamespace(input_cost_per_million=4.0, output_cost_per_million=10.0)
++    assert turn_cost_usd(usage, pricing) == pytest.approx(2.0)
++
++
++def test_turn_cost_supports_existing_pricing_entry():
++    PricingEntry, turn_cost_usd = _pricing_api()
++    pricing = PricingEntry(
++        input_cost_per_million=Decimal("1"),
++        output_cost_per_million=Decimal("3"),
++    )
++    usage = {"input_tokens": 2_000_000, "output_tokens": 1_000_000}
++    assert turn_cost_usd(usage, pricing) == pytest.approx(5.0)
++
++
++def test_turn_cost_includes_cache_read_and_cache_write_rates():
++    _, turn_cost_usd = _pricing_api()
++    usage = {
++        "input_tokens": 100_000,
++        "output_tokens": 0,
++        "cache_read_tokens": 1_000_000,
++        "cache_write_tokens": 2_000_000,
++    }
++    pricing = {
++        "input_cost_per_million": 2.0,
++        "output_cost_per_million": 8.0,
++        "cache_read_cost_per_million": 0.2,
++        "cache_write_cost_per_million": 2.5,
++    }
++    assert turn_cost_usd(usage, pricing) == pytest.approx(5.4)
++
++
++def test_turn_cost_includes_per_request_price():
++    _, turn_cost_usd = _pricing_api()
++    usage = {"input_tokens": 0, "output_tokens": 0, "request_count": 3}
++    pricing = {"request_cost": 0.125}
++    assert turn_cost_usd(usage, pricing) == pytest.approx(0.375)
++
++
++def test_turn_cost_unknown_pricing_returns_zero():
++    _, turn_cost_usd = _pricing_api()
++    assert turn_cost_usd({"input_tokens": 1_000_000}, None) == 0.0
++    assert turn_cost_usd({"input_tokens": 1_000_000}, {}) == 0.0
++
++
++def test_turn_cost_missing_usage_returns_zero():
++    _, turn_cost_usd = _pricing_api()
++    pricing = {"input_cost_per_million": 5.0, "output_cost_per_million": 10.0}
++    assert turn_cost_usd(None, pricing) == 0.0
++    assert turn_cost_usd({}, pricing) == 0.0
++
++
++def test_turn_cost_result_drives_budget_thresholds():
++    _, turn_cost_usd = _pricing_api()
++    budget = importlib.import_module("agent.spend_budget")
++    cost = turn_cost_usd(
++        {"input_tokens": 1_000_000, "output_tokens": 1_000_000},
++        {"input_cost_per_million": 2.0, "output_cost_per_million": 3.0},
++    )
++    tracker = budget.SpendBudgetTracker([budget.BudgetLimit("session", 5.0)])
++    events = tracker.record_usage(scope="session", cost_usd=cost, session_id="turn-1")
++    assert [event.kind for event in events] == ["warn", "exceeded"]
++    assert tracker.is_exceeded("session") is True

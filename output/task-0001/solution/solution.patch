@@ -1,0 +1,715 @@
+diff --git a/api/prisma/schema.prisma b/api/prisma/schema.prisma
+index 28082d5e..5a3b9532 100644
+--- a/api/prisma/schema.prisma
++++ b/api/prisma/schema.prisma
+@@ -106,6 +106,9 @@ model user {
+   acceptedPrivacyTerms           Boolean
+   completedChallenges            CompletedChallenge[]
+   completedDailyCodingChallenges CompletedDailyCodingChallenge[]
++  currentDailyCodingChallengeStreak     Int?    @default(0)
++  longestDailyCodingChallengeStreak     Int?    @default(0)
++  lastDailyCodingChallengeCompletionDay String?
+   completedExams                 CompletedExam[] // Undefined
+   quizAttempts                   QuizAttempt[] // Undefined
+   currentChallengeId             String?
+diff --git a/api/src/daily-coding-challenge/routes/daily-coding-challenge.ts b/api/src/daily-coding-challenge/routes/daily-coding-challenge.ts
+index f46703f0..36299654 100644
+--- a/api/src/daily-coding-challenge/routes/daily-coding-challenge.ts
++++ b/api/src/daily-coding-challenge/routes/daily-coding-challenge.ts
+@@ -8,6 +8,7 @@ import {
+   monthDayStringToUtcDate,
+   getSourceDate
+ } from '../utils/helpers.js';
++import { resolveDailyCodingChallengeStreak } from '../utils/streak.js';
+ 
+ /**
+  * Plugin containing public GET routes for the daily coding challenges.
+@@ -191,9 +192,26 @@ export const dailyCodingChallengeRoutes: FastifyPluginCallbackTypebox = (
+         fastify.Sentry?.metrics?.count('dcc.challenge_viewed', 1, {
+           attributes: { route: '/daily-coding-challenge/today' }
+         });
++        const persistedStreak = req.user?.id
++          ? await fastify.prisma.user.findUnique({
++              where: { id: req.user.id },
++              select: {
++                currentDailyCodingChallengeStreak: true,
++                longestDailyCodingChallengeStreak: true,
++                lastDailyCodingChallengeCompletionDay: true,
++                completedDailyCodingChallenges: true
++              }
++            })
++          : null;
++        const streak = resolveDailyCodingChallengeStreak(
++          persistedStreak?.completedDailyCodingChallenges,
++          persistedStreak
++        );
++
+         return reply.send({
+           ...todaysChallenge,
+-          date: todaysChallenge.date.toISOString()
++          date: todaysChallenge.date.toISOString(),
++          ...streak
+         });
+       } catch (error) {
+         req.log.error(error, "Failed to get today's daily coding challenge.");
+diff --git a/api/src/daily-coding-challenge/schemas/daily-coding-challenge.ts b/api/src/daily-coding-challenge/schemas/daily-coding-challenge.ts
+index 0ea600ed..fbce08ad 100644
+--- a/api/src/daily-coding-challenge/schemas/daily-coding-challenge.ts
++++ b/api/src/daily-coding-challenge/schemas/daily-coding-challenge.ts
+@@ -1,4 +1,5 @@
+ import { Type } from '@fastify/type-provider-typebox';
++import { optionalDailyCodingChallengeStreakProperties } from '../../schemas/daily-coding-challenge-streak.js';
+ 
+ const challengeLanguage = Type.Object({
+   tests: Type.Array(
+@@ -22,7 +23,8 @@ const singleChallengeResponse = Type.Object({
+   title: Type.String(),
+   description: Type.String(),
+   javascript: challengeLanguage,
+-  python: challengeLanguage
++  python: challengeLanguage,
++  ...optionalDailyCodingChallengeStreakProperties
+ });
+ 
+ const date = {
+diff --git a/api/src/daily-coding-challenge/utils/helpers.ts b/api/src/daily-coding-challenge/utils/helpers.ts
+index 4a6df819..7670c2d1 100644
+--- a/api/src/daily-coding-challenge/utils/helpers.ts
++++ b/api/src/daily-coding-challenge/utils/helpers.ts
+@@ -92,3 +92,11 @@ export function getSourceDate(date: Date): Date {
+ 
+   return new Date(Date.UTC(sourceYear, month - 1, day));
+ }
++
++/**
++ * Extracts completion timestamps (ms since epoch) from stored daily coding
++ * challenge records, for feeding into the streak computation utility.
++ * @param completedDailyCodingChallenges - Stored completed daily coding challenge records.
++ * @returns Array of completion timestamps in milliseconds since epoch.
++ */
++export { getDailyCodingChallengeCompletionDays } from './streak.js';
+diff --git a/api/src/daily-coding-challenge/utils/streak.ts b/api/src/daily-coding-challenge/utils/streak.ts
+new file mode 100644
+index 00000000..b56892dc
+--- /dev/null
++++ b/api/src/daily-coding-challenge/utils/streak.ts
+@@ -0,0 +1,114 @@
++import { computeStreak, type StreakResult } from '../../utils/streak.js';
++
++export interface DailyCodingChallengeCompletion {
++  completedDate: number;
++}
++
++export interface PersistedDailyCodingChallengeStreak {
++  currentDailyCodingChallengeStreak?: number | null;
++  longestDailyCodingChallengeStreak?: number | null;
++  lastDailyCodingChallengeCompletionDay?: string | null;
++}
++
++export interface DailyCodingChallengeStreakUpdate {
++  currentDailyCodingChallengeStreak: number;
++  longestDailyCodingChallengeStreak: number;
++  lastDailyCodingChallengeCompletionDay: string | null;
++}
++
++export const EMPTY_DAILY_CODING_CHALLENGE_STREAK: StreakResult = Object.freeze({
++  currentStreak: 0,
++  longestStreak: 0,
++  lastCompletionDay: null
++});
++
++/** Extract completion timestamps without exposing persistence details. */
++export function getDailyCodingChallengeCompletionDays(
++  completions: ReadonlyArray<DailyCodingChallengeCompletion>
++): number[] {
++  return completions.map(({ completedDate }) => completedDate);
++}
++
++/** Derive the canonical streak from the complete persisted history. */
++export function computeDailyCodingChallengeStreak(
++  completions: ReadonlyArray<DailyCodingChallengeCompletion>,
++  now: number | string | Date = new Date()
++): StreakResult {
++  return computeStreak(getDailyCodingChallengeCompletionDays(completions), now);
++}
++
++/** Map the public result to the additive Prisma user fields. */
++export function toDailyCodingChallengeStreakUpdate(
++  streak: StreakResult
++): DailyCodingChallengeStreakUpdate {
++  return {
++    currentDailyCodingChallengeStreak: streak.currentStreak,
++    longestDailyCodingChallengeStreak: streak.longestStreak,
++    lastDailyCodingChallengeCompletionDay: streak.lastCompletionDay
++  };
++}
++
++function normalizeCount(value: number | null | undefined): number {
++  return Number.isInteger(value) && value != null && value >= 0 ? value : 0;
++}
++
++/**
++ * Convert nullable legacy persistence fields to the stable public response.
++ * The invariants are enforced even for records written before this feature.
++ */
++export function fromPersistedDailyCodingChallengeStreak(
++  persisted: PersistedDailyCodingChallengeStreak | null | undefined
++): StreakResult {
++  if (!persisted) return { ...EMPTY_DAILY_CODING_CHALLENGE_STREAK };
++
++  const currentStreak = normalizeCount(
++    persisted.currentDailyCodingChallengeStreak
++  );
++  const longestStreak = Math.max(
++    currentStreak,
++    normalizeCount(persisted.longestDailyCodingChallengeStreak)
++  );
++  const lastCompletionDay =
++    typeof persisted.lastDailyCodingChallengeCompletionDay === 'string'
++      ? persisted.lastDailyCodingChallengeCompletionDay
++      : null;
++
++  return { currentStreak, longestStreak, lastCompletionDay };
++}
++
++function sameStreak(left: StreakResult, right: StreakResult): boolean {
++  return (
++    left.currentStreak === right.currentStreak &&
++    left.longestStreak === right.longestStreak &&
++    left.lastCompletionDay === right.lastCompletionDay
++  );
++}
++
++/**
++ * Resolve a response from history, falling back to persisted values only when
++ * a caller intentionally omits the history. This keeps existing users correct
++ * before they submit their next challenge and repairs stale derived fields.
++ */
++export function resolveDailyCodingChallengeStreak(
++  completions: ReadonlyArray<DailyCodingChallengeCompletion> | undefined,
++  persisted: PersistedDailyCodingChallengeStreak | null | undefined,
++  now: number | string | Date = new Date()
++): StreakResult {
++  if (completions) {
++    return computeDailyCodingChallengeStreak(completions, now);
++  }
++
++  return fromPersistedDailyCodingChallengeStreak(persisted);
++}
++
++/** Return true when a history-derived value should be written to the user. */
++export function dailyCodingChallengeStreakNeedsUpdate(
++  completions: ReadonlyArray<DailyCodingChallengeCompletion>,
++  persisted: PersistedDailyCodingChallengeStreak | null | undefined,
++  now: number | string | Date = new Date()
++): boolean {
++  return !sameStreak(
++    computeDailyCodingChallengeStreak(completions, now),
++    fromPersistedDailyCodingChallengeStreak(persisted)
++  );
++}
+diff --git a/api/src/routes/protected/challenge.ts b/api/src/routes/protected/challenge.ts
+index b11d363e..57c02de1 100644
+--- a/api/src/routes/protected/challenge.ts
++++ b/api/src/routes/protected/challenge.ts
+@@ -43,6 +43,10 @@ import {
+   verifyTrophyWithMicrosoft
+ } from '../helpers/challenge-helpers.js';
+ import { UpdateReplyType, UpdateReqType } from '../../utils/index.js';
++import {
++  computeDailyCodingChallengeStreak,
++  toDailyCodingChallengeStreakUpdate
++} from '../../daily-coding-challenge/utils/streak.js';
+ import {
+   normalizeChallengeType,
+   normalizeDate
+@@ -1200,14 +1204,24 @@ async function postDailyCodingChallengeCompleted(
+ 
+   if (alreadyCompleted) {
+     const { completedDate, languages } = oldCompletedChallenge;
++    const streak = computeDailyCodingChallengeStreak(
++      completedDailyCodingChallenges
++    );
++    const streakUpdate = toDailyCodingChallengeStreakUpdate(streak);
+ 
+     if (languageAlreadyCompleted) {
+-      // alreadyCompleted && languageAlreadyCompleted, no need to change anything in the database
++      // The completion record is unchanged, but derived fields are repaired in
++      // case this user predates streak persistence or has stale values.
++      await this.prisma.user.update({
++        where: { id: req.user?.id },
++        data: streakUpdate
++      });
+       return reply.send({
+         alreadyCompleted,
+         points,
+         completedDate,
+-        completedDailyCodingChallenges
++        completedDailyCodingChallenges,
++        ...streak
+       });
+     } else {
+       // alreadyCompleted && !languageAlreadyCompleted, add the language to the record
+@@ -1217,6 +1231,7 @@ async function postDailyCodingChallengeCompleted(
+           completedDailyCodingChallenges: true
+         },
+         data: {
++          ...streakUpdate,
+           completedDailyCodingChallenges: {
+             updateMany: {
+               where: { id },
+@@ -1231,7 +1246,8 @@ async function postDailyCodingChallengeCompleted(
+         alreadyCompleted,
+         points,
+         completedDate,
+-        completedDailyCodingChallenges
++        completedDailyCodingChallenges,
++        ...streak
+       });
+     }
+   } else {
+@@ -1252,19 +1268,22 @@ async function postDailyCodingChallengeCompleted(
+     const newProgressTimestamps = Array.isArray(progressTimestamps)
+       ? [...progressTimestamps, newCompletedDate]
+       : [newCompletedDate];
++    const streak = computeDailyCodingChallengeStreak(newCompletedChallenges);
+ 
+     await this.prisma.user.update({
+       where: { id: req.user?.id },
+       data: {
+         completedDailyCodingChallenges: newCompletedChallenges,
+-        progressTimestamps: newProgressTimestamps
++        progressTimestamps: newProgressTimestamps,
++        ...toDailyCodingChallengeStreakUpdate(streak)
+       }
+     });
+     return reply.send({
+       alreadyCompleted,
+       points: points + 1,
+       completedDate: newCompletedDate,
+-      completedDailyCodingChallenges: newCompletedChallenges
++      completedDailyCodingChallenges: newCompletedChallenges,
++      ...streak
+     });
+   }
+ }
+diff --git a/api/src/routes/protected/user.ts b/api/src/routes/protected/user.ts
+index 84c64d1b..0b330f97 100644
+--- a/api/src/routes/protected/user.ts
++++ b/api/src/routes/protected/user.ts
+@@ -41,6 +41,7 @@ import {
+ } from '../../exam-environment/routes/exam-environment.js';
+ import { ERRORS } from '../../exam-environment/utils/errors.js';
+ import { getChallengeIdsByBlock } from '../../utils/get-challenges.js';
++import { resolveDailyCodingChallengeStreak } from '../../daily-coding-challenge/utils/streak.js';
+ 
+ /**
+  * Helper function to get the api url from the shared transcript link.
+@@ -810,6 +811,9 @@ export const userGetRoutes: FastifyPluginCallbackTypebox = (
+           acceptedPrivacyTerms: true,
+           completedChallenges: true,
+           completedDailyCodingChallenges: true,
++          currentDailyCodingChallengeStreak: true,
++          longestDailyCodingChallengeStreak: true,
++          lastDailyCodingChallengeCompletionDay: true,
+           completedExams: true,
+           currentChallengeId: true,
+           quizAttempts: true,
+@@ -910,6 +914,9 @@ export const userGetRoutes: FastifyPluginCallbackTypebox = (
+         usernameDisplay,
+         completedChallenges,
+         completedDailyCodingChallenges,
++        currentDailyCodingChallengeStreak,
++        longestDailyCodingChallengeStreak,
++        lastDailyCodingChallengeCompletionDay,
+         progressTimestamps,
+         twitter,
+         bluesky,
+@@ -922,6 +929,14 @@ export const userGetRoutes: FastifyPluginCallbackTypebox = (
+         socrates,
+         ...publicUser
+       } = rest;
++      const streak = resolveDailyCodingChallengeStreak(
++        completedDailyCodingChallenges,
++        {
++          currentDailyCodingChallengeStreak,
++          longestDailyCodingChallengeStreak,
++          lastDailyCodingChallengeCompletionDay
++        }
++      );
+ 
+       await res.send({
+         user: {
+@@ -935,6 +950,7 @@ export const userGetRoutes: FastifyPluginCallbackTypebox = (
+             completedChallenges: normalizeChallenges(completedChallenges),
+             completedChallengeCount: completedChallenges.length,
+             completedDailyCodingChallenges,
++            ...streak,
+             // This assertion is necessary until the database is normalized.
+             calendar: getCalendar(
+               progressTimestamps as ProgressTimestamp[] | null
+diff --git a/api/src/schemas/challenge/daily-coding-challenge-completed.ts b/api/src/schemas/challenge/daily-coding-challenge-completed.ts
+index ec896b43..407d634b 100644
+--- a/api/src/schemas/challenge/daily-coding-challenge-completed.ts
++++ b/api/src/schemas/challenge/daily-coding-challenge-completed.ts
+@@ -1,5 +1,6 @@
+ import { Type } from '@fastify/type-provider-typebox';
+ import { genericError } from '../types.js';
++import { dailyCodingChallengeStreakProperties } from '../daily-coding-challenge-streak.js';
+ 
+ // This has to be declared as a tuple, because Type.Union expects a
+ // tuple of types, not an array of unions of said types.
+@@ -24,7 +25,8 @@ export const dailyCodingChallengeCompleted = {
+           completedDate: Type.Number(),
+           languages: Type.Array(Type.Union(languages))
+         })
+-      )
++      ),
++      ...dailyCodingChallengeStreakProperties
+     }),
+     400: Type.Object({
+       type: Type.Literal('error'),
+diff --git a/api/src/schemas/daily-coding-challenge-streak.ts b/api/src/schemas/daily-coding-challenge-streak.ts
+new file mode 100644
+index 00000000..dc57bb48
+--- /dev/null
++++ b/api/src/schemas/daily-coding-challenge-streak.ts
+@@ -0,0 +1,29 @@
++import { Type, type Static } from '@fastify/type-provider-typebox';
++
++const nonNegativeInteger = Type.Integer({ minimum: 0 });
++const nullableCompletionDay = Type.Union([
++  Type.String({ pattern: '^\\d{4}-\\d{2}-\\d{2}$' }),
++  Type.Null()
++]);
++
++/** Canonical required streak fields used by completion and session schemas. */
++export const dailyCodingChallengeStreakProperties = {
++  currentStreak: nonNegativeInteger,
++  longestStreak: nonNegativeInteger,
++  lastCompletionDay: nullableCompletionDay
++};
++
++/** Optional form for additive fields on existing challenge GET responses. */
++export const optionalDailyCodingChallengeStreakProperties = {
++  currentStreak: Type.Optional(nonNegativeInteger),
++  longestStreak: Type.Optional(nonNegativeInteger),
++  lastCompletionDay: Type.Optional(nullableCompletionDay)
++};
++
++export const dailyCodingChallengeStreakSchema = Type.Object(
++  dailyCodingChallengeStreakProperties
++);
++
++export type DailyCodingChallengeStreakResponse = Static<
++  typeof dailyCodingChallengeStreakSchema
++>;
+diff --git a/api/src/schemas/user/get-session-user.ts b/api/src/schemas/user/get-session-user.ts
+index 2843b5a9..6599939a 100644
+--- a/api/src/schemas/user/get-session-user.ts
++++ b/api/src/schemas/user/get-session-user.ts
+@@ -5,6 +5,7 @@ import {
+   savedChallenge,
+   experience
+ } from '../types.js';
++import { dailyCodingChallengeStreakProperties } from '../daily-coding-challenge-streak.js';
+ 
+ const languages = Type.Array(
+   Type.Union([Type.Literal('javascript'), Type.Literal('python')])
+@@ -65,6 +66,7 @@ export const getSessionUser = {
+               languages
+             })
+           ),
++          ...dailyCodingChallengeStreakProperties,
+           currentChallengeId: Type.String(),
+           email: Type.String(),
+           emailVerified: Type.Boolean(),
+diff --git a/api/src/utils/index.ts b/api/src/utils/index.ts
+index f7a90084..6f3835dc 100644
+--- a/api/src/utils/index.ts
++++ b/api/src/utils/index.ts
+@@ -126,3 +126,20 @@ export function syncMapErr<T>(fn: () => T): Result<T> {
+ export type Result<T> =
+   | { hasError: false; data: T }
+   | { hasError: true; error: unknown };
++
++export {
++  assertValidStreakResult,
++  buildStreakTimeline,
++  computeStreak,
++  normalizeCompletionDays,
++  ordinalToUtcDay,
++  shiftUtcDay,
++  toUtcDayString,
++  utcDayToOrdinal
++} from './streak.js';
++export type {
++  StreakInput,
++  StreakResult,
++  StreakRun,
++  StreakTimeline
++} from './streak.js';
+diff --git a/api/src/utils/streak.ts b/api/src/utils/streak.ts
+new file mode 100644
+index 00000000..ea15961d
+--- /dev/null
++++ b/api/src/utils/streak.ts
+@@ -0,0 +1,258 @@
++/**
++ * Values returned by the Daily Coding Challenge streak calculator.
++ */
++export interface StreakResult {
++  currentStreak: number;
++  longestStreak: number;
++  lastCompletionDay: string | null;
++}
++
++/** A supported completion timestamp or UTC calendar day. */
++export type StreakInput = number | string | Date;
++
++interface CompletionRun {
++  start: number;
++  end: number;
++  length: number;
++}
++
++/** A canonical consecutive run, suitable for diagnostics and backfills. */
++export interface StreakRun {
++  startDay: string;
++  endDay: string;
++  length: number;
++}
++
++/** Normalized completion history with its consecutive runs. */
++export interface StreakTimeline {
++  completionDays: string[];
++  runs: StreakRun[];
++}
++
++const UTC_DAY_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/;
++const MS_PER_DAY = 86_400_000;
++
++function dateFromInput(input: StreakInput): Date {
++  if (input instanceof Date) {
++    return new Date(input.getTime());
++  }
++
++  if (typeof input === 'number' && !Number.isFinite(input)) {
++    throw new TypeError('Completion timestamps must be finite numbers.');
++  }
++
++  const date = new Date(input);
++  if (Number.isNaN(date.getTime())) {
++    throw new TypeError('Completion timestamps must be valid dates.');
++  }
++
++  return date;
++}
++
++function padDatePart(value: number): string {
++  return String(value).padStart(2, '0');
++}
++
++function formatUtcDay(date: Date): string {
++  return [
++    String(date.getUTCFullYear()).padStart(4, '0'),
++    padDatePart(date.getUTCMonth() + 1),
++    padDatePart(date.getUTCDate())
++  ].join('-');
++}
++
++function validateUtcDayString(day: string): string {
++  const match = UTC_DAY_PATTERN.exec(day);
++  if (!match) {
++    throw new TypeError('Completion day strings must use YYYY-MM-DD.');
++  }
++
++  const year = Number(match[1]);
++  const month = Number(match[2]);
++  const date = Number(match[3]);
++  const parsed = new Date(Date.UTC(year, month - 1, date));
++
++  if (
++    parsed.getUTCFullYear() !== year ||
++    parsed.getUTCMonth() !== month - 1 ||
++    parsed.getUTCDate() !== date
++  ) {
++    throw new TypeError('Completion day strings must be real UTC dates.');
++  }
++
++  return day;
++}
++
++/**
++ * Convert a timestamp, Date, ISO timestamp, or UTC date string to YYYY-MM-DD.
++ * Invalid dates fail loudly so corrupt completion data cannot alter a streak.
++ */
++export function toUtcDayString(input: StreakInput): string {
++  if (typeof input === 'string' && UTC_DAY_PATTERN.test(input)) {
++    return validateUtcDayString(input);
++  }
++
++  return formatUtcDay(dateFromInput(input));
++}
++
++/** Convert a validated YYYY-MM-DD value to a UTC day ordinal. */
++export function utcDayToOrdinal(day: string): number {
++  const validDay = validateUtcDayString(day);
++  const [year, month, date] = validDay.split('-').map(Number) as [
++    number,
++    number,
++    number
++  ];
++
++  return Math.floor(Date.UTC(year, month - 1, date) / MS_PER_DAY);
++}
++
++/** Convert a UTC day ordinal back to the canonical YYYY-MM-DD form. */
++export function ordinalToUtcDay(ordinal: number): string {
++  if (!Number.isInteger(ordinal)) {
++    throw new TypeError('UTC day ordinals must be integers.');
++  }
++
++  return formatUtcDay(new Date(ordinal * MS_PER_DAY));
++}
++
++/**
++ * Normalize, deduplicate, and sort completion inputs by UTC calendar day.
++ */
++export function normalizeCompletionDays(
++  completions: ReadonlyArray<StreakInput>
++): string[] {
++  if (!Array.isArray(completions)) {
++    throw new TypeError('Completions must be an array.');
++  }
++
++  return [...new Set(completions.map(toUtcDayString))].sort();
++}
++
++function collectRuns(ordinals: readonly number[]): CompletionRun[] {
++  if (ordinals.length === 0) return [];
++
++  const runs: CompletionRun[] = [];
++  let start = ordinals[0]!;
++  let previous = start;
++
++  for (const ordinal of ordinals.slice(1)) {
++    if (ordinal === previous + 1) {
++      previous = ordinal;
++      continue;
++    }
++
++    runs.push({ start, end: previous, length: previous - start + 1 });
++    start = ordinal;
++    previous = ordinal;
++  }
++
++  runs.push({ start, end: previous, length: previous - start + 1 });
++  return runs;
++}
++
++/**
++ * Build the canonical timeline used by the streak summary. Exposing this
++ * representation lets migration and debugging code inspect gaps without
++ * reimplementing UTC normalization.
++ */
++export function buildStreakTimeline(
++  completions: ReadonlyArray<StreakInput>
++): StreakTimeline {
++  const completionDays = normalizeCompletionDays(completions);
++  const ordinalRuns = collectRuns(completionDays.map(utcDayToOrdinal));
++  const runs = ordinalRuns.map(({ start, end, length }) => ({
++    startDay: ordinalToUtcDay(start),
++    endDay: ordinalToUtcDay(end),
++    length
++  }));
++
++  return { completionDays, runs };
++}
++
++/** Return a new UTC day string shifted by a whole number of days. */
++export function shiftUtcDay(day: string, amount: number): string {
++  if (!Number.isInteger(amount)) {
++    throw new TypeError('UTC day shifts must be integers.');
++  }
++
++  return ordinalToUtcDay(utcDayToOrdinal(day) + amount);
++}
++
++function longestRun(runs: readonly CompletionRun[]): number {
++  return runs.reduce((longest, run) => Math.max(longest, run.length), 0);
++}
++
++function currentRun(
++  runs: readonly CompletionRun[],
++  todayOrdinal: number
++): number {
++  const latest = runs.at(-1);
++  if (!latest) return 0;
++
++  const isCurrent =
++    latest.end === todayOrdinal || latest.end === todayOrdinal - 1;
++  return isCurrent ? latest.length : 0;
++}
++
++/**
++ * Validate invariants before a result crosses a schema or persistence
++ * boundary. This is intentionally exported for one-off repair jobs.
++ */
++export function assertValidStreakResult(
++  result: StreakResult
++): asserts result is StreakResult {
++  const counts = [result.currentStreak, result.longestStreak];
++  if (counts.some(value => !Number.isInteger(value) || value < 0)) {
++    throw new TypeError('Streak counts must be non-negative integers.');
++  }
++
++  if (result.currentStreak > result.longestStreak) {
++    throw new TypeError('The current streak cannot exceed the longest streak.');
++  }
++
++  if (result.lastCompletionDay !== null) {
++    validateUtcDayString(result.lastCompletionDay);
++  }
++
++  if (result.longestStreak === 0 && result.lastCompletionDay !== null) {
++    throw new TypeError('An empty streak cannot have a last completion day.');
++  }
++
++  if (result.longestStreak > 0 && result.lastCompletionDay === null) {
++    throw new TypeError('A non-empty streak requires a last completion day.');
++  }
++}
++
++/**
++ * Compute Daily Coding Challenge streaks from completion timestamps.
++ *
++ * A UTC calendar day can contribute at most once. The current streak remains
++ * active when its last completion is today or yesterday, and expires only
++ * after a full missed UTC day. The longest streak is independent of recency.
++ *
++ * `now` is injectable so tests, migrations, and backfills remain deterministic.
++ */
++export function computeStreak(
++  completions: ReadonlyArray<StreakInput>,
++  now: StreakInput = new Date()
++): StreakResult {
++  const days = normalizeCompletionDays(completions);
++  if (days.length === 0) {
++    return { currentStreak: 0, longestStreak: 0, lastCompletionDay: null };
++  }
++
++  const ordinals = days.map(utcDayToOrdinal);
++  const runs = collectRuns(ordinals);
++  const todayOrdinal = utcDayToOrdinal(toUtcDayString(now));
++  const currentStreak = currentRun(runs, todayOrdinal);
++  const longestStreak = longestRun(runs);
++
++  const result = {
++    currentStreak,
++    longestStreak: Math.max(currentStreak, longestStreak),
++    lastCompletionDay: days.at(-1)!
++  };
++  assertValidStreakResult(result);
++  return result;
++}

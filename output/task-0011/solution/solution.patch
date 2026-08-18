@@ -1,0 +1,913 @@
+diff --git a/src/computed.ts b/src/computed.ts
+new file mode 100644
+index 0000000..6ba9fd8
+--- /dev/null
++++ b/src/computed.ts
+@@ -0,0 +1,22 @@
++// Co-located re-exports for the computed feature, mirroring `src/shallow.ts`.
++//
++// This module surfaces both halves of the computed feature from a single
++// import path:
++//
++//   - `computed` and `ComputedOptions` come from the vanilla middleware layer
++//     (`src/middleware/computed.ts`). `computed` wraps a state creator with a
++//     `compute(state) => C` function whose result is merged read-only into the
++//     store state so computed keys are visible through `getState()`, selectors,
++//     and every existing consumer.
++//
++//   - `useComputed` comes from the React layer (`src/react/computed.ts`). It
++//     derives a value from a store inside a component, memoizing across renders
++//     with an equality function (default `shallow`) and is concurrent-safe via
++//     `useSyncExternalStore`.
++//
++// Both are built on the same shared memoization core in
++// `src/vanilla/shallow.ts` (`createComputeMemo`) so referential stability is
++// consistent between the store layer and the React layer.
++
++export { computed, type ComputedOptions } from './middleware/computed.ts'
++export { useComputed } from './react/computed.ts'
+diff --git a/src/index.ts b/src/index.ts
+index 27b7a4f..b87469e 100644
+--- a/src/index.ts
++++ b/src/index.ts
+@@ -1,2 +1,9 @@
+ export * from './vanilla.ts'
+ export * from './react.ts'
++
++// Surface the React `useComputed` hook from the main `zustand` entry so that
++// `import { useComputed } from 'zustand'` resolves. Although `./react.ts`
++// already re-exports it via the wildcard above, this explicit re-export keeps
++// the computed feature discoverable from the root barrel and documents the
++// public entry point alongside `create`/`useStore`.
++export { useComputed } from './react/computed.ts'
+diff --git a/src/middleware.ts b/src/middleware.ts
+index 47cb9c1..ef3bf55 100644
+--- a/src/middleware.ts
++++ b/src/middleware.ts
+@@ -15,3 +15,4 @@ export {
+   type PersistOptions,
+ } from './middleware/persist.ts'
+ export { ssrSafe as unstable_ssrSafe } from './middleware/ssrSafe.ts'
++export { computed, type ComputedOptions } from './middleware/computed.ts'
+diff --git a/src/middleware/computed.ts b/src/middleware/computed.ts
+new file mode 100644
+index 0000000..7c6a0ba
+--- /dev/null
++++ b/src/middleware/computed.ts
+@@ -0,0 +1,299 @@
++import type {
++  StateCreator,
++  StoreApi,
++  StoreMutatorIdentifier,
++} from '../vanilla.ts'
++import { createComputeMemo, shallow } from '../vanilla/shallow.ts'
++
++/**
++ * Write helper: overlay the computed keys `U` onto the base state shape `T`.
++ * Computed keys take precedence over any base keys with the same name because
++ * they are always re-merged last inside the wrapped setState cycle.
++ */
++type Write<T, U> = Omit<T, keyof U> & U
++
++/**
++ * Options accepted by the {@link computed} middleware.
++ *
++ * - `equalityFn` controls per-key referential stability. When a recomputed
++ *   value is equal to the previous value under this function, the previous
++ *   reference is preserved so downstream selectors and React components do not
++ *   re-render spuriously. Defaults to `Object.is`.
++ * - `keys` restricts which base-state keys trigger recomputation. When
++ *   provided, the derived values are only recomputed if one of the listed base
++ *   keys changed (shallow compared). When omitted, recomputation runs on every
++ *   update.
++ */
++export interface ComputedOptions<C extends object> {
++  equalityFn?: (a: C[keyof C], b: C[keyof C]) => boolean
++  keys?: (keyof C)[]
++}
++
++/**
++ * The store mutator produced by the computed middleware. It writes the computed
++ * keys `A` onto the state exposed by `getState`, `getInitialState`, and
++ * `subscribe`, while preserving the existing `setState` overloads untouched so
++ * that composition with other middleware keeps working.
++ */
++type WithComputed<S, A> = S extends {
++  getState: () => infer T
++  setState: infer SetState
++}
++  ? Write<
++      S,
++      {
++        getState: () => Write<T, A>
++        getInitialState: () => Write<T, A>
++        setState: SetState
++        subscribe: (
++          listener: (state: Write<T, A>, prevState: Write<T, A>) => void,
++        ) => () => void
++      }
++    >
++  : S extends { getState: () => infer T }
++    ? Write<
++        S,
++        {
++          getState: () => Write<T, A>
++          getInitialState: () => Write<T, A>
++          subscribe: (
++            listener: (state: Write<T, A>, prevState: Write<T, A>) => void,
++          ) => () => void
++        }
++      >
++    : never
++
++declare module '../vanilla.ts' {
++  // eslint-disable-next-line @typescript-eslint/no-unused-vars, @typescript-eslint/no-empty-object-type
++  interface StoreMutators<S, A> {
++    'zustand/computed': WithComputed<S, A>
++  }
++}
++
++/**
++ * Public type signature for the computed middleware. It threads the computed
++ * mutator through the mutator chain so that the resulting store exposes the
++ * computed keys `C` in both selector state and `getState()` types, for both
++ * `create` and `createStore`.
++ */
++type Computed = <
++  T,
++  C extends object,
++  Mps extends [StoreMutatorIdentifier, unknown][] = [],
++  Mcs extends [StoreMutatorIdentifier, unknown][] = [],
++  U = T,
++>(
++  initializer: StateCreator<T, [...Mps, ['zustand/computed', C]], Mcs, U>,
++  compute: (state: T) => C,
++  options?: ComputedOptions<C>,
++) => StateCreator<Write<T & U, C>, Mps, [['zustand/computed', C], ...Mcs]>
++
++type AnyState = Record<string | number | symbol, unknown>
++
++type ComputedImpl = <T, C extends object>(
++  initializer: StateCreator<T, [], []>,
++  compute: (state: T) => C,
++  options?: ComputedOptions<C>,
++) => StateCreator<T, [], []>
++
++/**
++ * Determine whether a value should be treated as a mergeable object. Non-object
++ * values (primitives, null) are replaced wholesale by `setState`, mirroring the
++ * behavior of the vanilla store.
++ */
++const isMergeableObject = (value: unknown): value is AnyState =>
++  typeof value === 'object' && value !== null
++
++/**
++ * Compute the set of tracked base-state keys used to gate recomputation. Only
++ * the keys listed in `options.keys` are captured; every other change is
++ * ignored for the purpose of deciding whether to recompute.
++ */
++const pickTracked = (
++  state: AnyState,
++  keys: readonly (string | number | symbol)[],
++): AnyState => {
++  const tracked: AnyState = {}
++  for (let i = 0; i < keys.length; i++) {
++    const key = keys[i] as keyof AnyState
++    tracked[key] = state[key]
++  }
++  return tracked
++}
++
++const computedImpl: ComputedImpl =
++  (initializer, compute, options = {}) =>
++  (set, get, api) => {
++    const equalityFn = (options.equalityFn ?? Object.is) as (
++      a: unknown,
++      b: unknown,
++    ) => boolean
++
++    // The shared memoization core preserves per-key referential stability for
++    // computed values whose recomputed result is equal under `equalityFn`.
++    const memo = createComputeMemo(
++      compute as (state: unknown) => AnyState,
++      equalityFn as (a: unknown, b: unknown) => boolean,
++    )
++
++    const trackedKeys = (options.keys ?? undefined) as
++      | readonly (keyof AnyState)[]
++      | undefined
++
++    // Snapshot of the tracked base-state keys from the last recomputation. Used
++    // to decide whether a subsequent update actually touched a tracked key.
++    let lastTracked: AnyState | undefined
++
++    // Set of computed keys produced by the most recent recomputation. Used to
++    // guarantee computed keys are read-only: any direct write to them is
++    // overridden by the freshly computed value.
++    let computedKeys: Set<string | number | symbol> = new Set()
++
++    // Persist can use this non-public marker to distinguish derived fields
++    // from user-owned state when its default partialize function is active.
++    // It is deliberately kept on the store API rather than state so computed
++    // keys are never serialized by accident.
++    ;(api as StoreApi<unknown> & { __zustandComputedKeys?: Set<PropertyKey> })
++      .__zustandComputedKeys = computedKeys
++
++    /**
++     * Recompute derived values and merge them read-only onto `state`.
++     *
++     * When `options.keys` is provided and `force` is false, recomputation is
++     * skipped if none of the tracked base keys changed since the previous run;
++     * in that case the previously computed values are re-applied so they remain
++     * present and read-only even when a direct write attempted to change them.
++     */
++    const applyComputed = (state: unknown, force: boolean): unknown => {
++      if (!isMergeableObject(state)) {
++        // Non-object base states cannot carry computed keys; return as-is.
++        return state
++      }
++
++      let recompute = true
++      if (trackedKeys && !force) {
++        const nextTracked = pickTracked(state, trackedKeys)
++        if (lastTracked !== undefined && shallow(lastTracked, nextTracked)) {
++          recompute = false
++        } else {
++          lastTracked = nextTracked
++        }
++      } else if (trackedKeys) {
++        lastTracked = pickTracked(state, trackedKeys)
++      }
++
++      // Always run the memo so referential stability is maintained. When gating
++      // says we should not recompute due to unchanged tracked keys, the memo
++      // still returns the previous computed object because its own compute is
++      // invoked with a state whose tracked inputs are unchanged. To make the
++      // gate authoritative and avoid running arbitrary compute work, we only
++      // call the memo when recomputation is warranted; otherwise we reuse the
++      // last computed object captured below.
++      let computedValues: AnyState
++      if (recompute) {
++        computedValues = memo(state)
++        lastComputed = computedValues
++      } else {
++        computedValues = lastComputed ?? memo(state)
++        lastComputed = computedValues
++      }
++
++      // Track which keys are computed so that direct writes to them can be
++      // detected and overridden on the next cycle.
++      const nextComputedKeys = new Set<string | number | symbol>()
++      for (const key in computedValues) {
++        nextComputedKeys.add(key)
++      }
++      computedKeys = nextComputedKeys
++      ;(
++        api as StoreApi<unknown> & { __zustandComputedKeys?: Set<PropertyKey> }
++      ).__zustandComputedKeys = computedKeys
++
++      // Merge computed keys last so they override any user-provided writes to
++      // the same keys, enforcing read-only semantics.
++      return Object.assign({}, state, computedValues)
++    }
++
++    // The last computed object, retained so gated (skipped) recomputations can
++    // still re-apply computed keys read-only without invoking compute.
++    let lastComputed: AnyState | undefined
++
++    /**
++     * Wrapped setState. It resolves the user's partial/replace update against
++     * the current state, recomputes derived values, merges them read-only, and
++     * commits everything through the underlying store in a single `set` call
++     * (with `replace: true`) so subscribers are notified exactly once.
++     */
++    const setState: StoreApi<unknown>['setState'] = (
++      partial: unknown,
++      replace?: boolean,
++    ) => {
++      const prevState = get() as unknown
++
++      const partialState =
++        typeof partial === 'function'
++          ? (partial as (state: unknown) => unknown)(prevState)
++          : partial
++
++      // Nothing changed; still ensure computed keys stay consistent by letting
++      // the underlying store's Object.is short-circuit handle the no-op.
++      if (Object.is(partialState, prevState)) {
++        return
++      }
++
++      let nextState: unknown
++      const shouldReplace =
++        replace ?? !isMergeableObject(partialState)
++
++      if (shouldReplace) {
++        // replace:true re-establishes state from scratch; computed keys are
++        // re-merged afterwards so they are never lost by a replacing write.
++        nextState = partialState
++      } else if (isMergeableObject(prevState)) {
++        nextState = Object.assign({}, prevState, partialState as AnyState)
++      } else {
++        nextState = partialState
++      }
++
++      // Strip any user-provided values for computed keys before recomputation so
++      // that a direct write to a computed key cannot leak through even for a
++      // single frame; the authoritative computed values are merged next.
++      if (isMergeableObject(nextState) && computedKeys.size) {
++        for (const key of computedKeys) {
++          if (
++            isMergeableObject(prevState) &&
++            key in (prevState as AnyState)
++          ) {
++            ;(nextState as AnyState)[key] = (prevState as AnyState)[key]
++          }
++        }
++      }
++
++      const merged = applyComputed(nextState, false)
++
++      // Commit once with replace:true. `merged` is a fully-formed next state
++      // (base + computed), so replacing avoids a second shallow merge and keeps
++      // subscriber notification to exactly one per update.
++      ;(set as (state: unknown, replace: true) => void)(merged, true)
++    }
++
++    // Expose the wrapped setState on the store api so that other middleware and
++    // consumers that read `api.setState` observe computed behavior too.
++    api.setState = setState as StoreApi<unknown>['setState']
++
++    // Build the base initial state using the wrapped setState/getState so that
++    // inner initializers (immer, combine, persist, ...) see a consistent api.
++    const baseInitialState = initializer(
++      setState as Parameters<typeof initializer>[0],
++      get,
++      api,
++    )
++
++    // Seed computed values into the initial state so getState() and
++    // getInitialState() (SSR) already include the derived keys.
++    return applyComputed(baseInitialState, true) as ReturnType<
++      typeof initializer
++    >
++  }
++
++export const computed = computedImpl as unknown as Computed
+diff --git a/src/middleware/persist.ts b/src/middleware/persist.ts
+index e7c0682..128d71a 100644
+--- a/src/middleware/persist.ts
++++ b/src/middleware/persist.ts
+@@ -196,6 +196,7 @@ const persistImpl: PersistImpl = (config, baseOptions) => (set, get, api) => {
+     }),
+     ...baseOptions,
+   }
++  const userPartialize = baseOptions?.partialize
+ 
+   let hasHydrated = false
+   // Counter to track hydration versions and prevent race conditions
+@@ -219,7 +220,17 @@ const persistImpl: PersistImpl = (config, baseOptions) => (set, get, api) => {
+   }
+ 
+   const setItem = () => {
+-    const state = options.partialize({ ...get() })
++    let snapshot = { ...get() } as S & Record<PropertyKey, unknown>
++    if (!userPartialize) {
++      const computedKeys = (
++        api as StoreApi<S> & { __zustandComputedKeys?: Set<PropertyKey> }
++      ).__zustandComputedKeys
++      if (computedKeys) {
++        snapshot = { ...snapshot }
++        for (const key of computedKeys) delete snapshot[key]
++      }
++    }
++    const state = options.partialize(snapshot)
+     return (storage as PersistStorage<S, unknown>).setItem(options.name, {
+       state,
+       version: options.version,
+diff --git a/src/react.ts b/src/react.ts
+index 7b2b07b..f0a918a 100644
+--- a/src/react.ts
++++ b/src/react.ts
+@@ -62,3 +62,47 @@ const createImpl = <T>(createState: StateCreator<T, [], []>) => {
+ 
+ export const create = (<T>(createState: StateCreator<T, [], []> | undefined) =>
+   createState ? createImpl(createState) : createImpl) as Create
++
++/**
++ * Re-export the `useComputed` React hook from the main package entry.
++ *
++ * `useComputed` derives a value from a store inside a component, memoizing the
++ * derived output across renders with an equality function (default `shallow`)
++ * so the component only re-renders when the derived value actually changes. It
++ * is built on the exact same subscribe/getState contract used by `useStore`
++ * above and is concurrent-safe via `useSyncExternalStore`.
++ *
++ * Surfacing it here means `import { useComputed } from 'zustand'` resolves,
++ * matching how `useStore` and `create` are exposed from the react barrel.
++ */
++export { useComputed } from './react/computed.ts'
++
++/**
++ * The minimal read-only store api that hooks in this module depend on. It is
++ * re-declared (not re-exported from vanilla) to keep the react layer's public
++ * type surface self-contained while still matching the vanilla `StoreApi`
++ * shape for `getState`, `getInitialState`, and `subscribe`.
++ */
++export type ReadonlyStoreApiForComputed<T> = Pick<
++  StoreApi<T>,
++  'getState' | 'getInitialState' | 'subscribe'
++>
++
++/**
++ * Helper type that mirrors the runtime signature of the `useComputed` hook.
++ * Consumers writing their own typed wrappers around `useComputed` can reference
++ * this to stay in sync with the canonical signature without importing internal
++ * modules directly.
++ */
++export type UseComputed = <
++  S extends {
++    getState: () => unknown
++    getInitialState: () => unknown
++    subscribe: (listener: (state: unknown) => void) => () => void
++  },
++  U,
++>(
++  api: S,
++  compute: (state: ExtractState<S>) => U,
++  equalityFn?: (a: U, b: U) => boolean,
++) => U
+diff --git a/src/react/computed.ts b/src/react/computed.ts
+new file mode 100644
+index 0000000..287ebf2
+--- /dev/null
++++ b/src/react/computed.ts
+@@ -0,0 +1,158 @@
++import React from 'react'
++import { shallow } from '../vanilla/shallow.ts'
++import type { ExtractState } from '../vanilla.ts'
++
++/**
++ * The minimal read-only store contract that {@link useComputed} depends on. It
++ * mirrors the same `getState` / `getInitialState` / `subscribe` surface used by
++ * `useStore`, so any store created by `create` or `createStore` (with or
++ * without middleware, including the `computed` middleware) satisfies it.
++ */
++type ReadonlyStoreApi<T> = {
++  getState: () => T
++  getInitialState: () => T
++  subscribe: (listener: (state: T) => void) => () => void
++}
++
++/**
++ * Internal reference cell holding the last derived value. `hasValue` guards the
++ * first render where there is no previous value to compare against, avoiding a
++ * spurious equality check against `undefined`.
++ */
++type ComputedRef<U> = {
++  hasValue: boolean
++  value: U
++  /**
++   * The state instance the cached value was derived from. Used purely as a
++   * fast-path so repeated snapshot reads within a single commit that observe
++   * the exact same state reference can skip recomputation entirely.
++   */
++  state: unknown
++}
++
++const createRef = <U>(): ComputedRef<U> => ({
++  hasValue: false,
++  value: undefined as unknown as U,
++  state: Symbol('uninitialized'),
++})
++
++/**
++ * Derive a value from a store inside a React component.
++ *
++ * `useComputed` reads state through the same subscribe/getState contract used
++ * by `useStore` and is concurrent-safe via `useSyncExternalStore`. The derived
++ * value is memoized across renders using `equalityFn` (default `shallow`) so a
++ * component only re-renders when the derived output actually changes. When the
++ * recomputed result is equal under `equalityFn`, the previous reference is
++ * preserved, keeping referential stability for downstream consumers.
++ *
++ * @param api - a store api exposing `getState`, `getInitialState`, `subscribe`.
++ * @param compute - selector/derivation invoked with the current store state.
++ * @param equalityFn - equality used to decide whether the derived value
++ *   changed. Defaults to the shared {@link shallow} implementation.
++ */
++export function useComputed<
++  S extends {
++    getState: () => unknown
++    getInitialState: () => unknown
++    subscribe: (listener: (state: unknown) => void) => () => void
++  },
++  U,
++>(
++  api: S,
++  compute: (state: ExtractState<S>) => U,
++  equalityFn: (a: U, b: U) => boolean = shallow,
++): U {
++  const store = api as unknown as ReadonlyStoreApi<ExtractState<S>>
++
++  // A single mutable ref cell survives across renders and holds the last value
++  // returned to React. `useSyncExternalStore` requires snapshot functions to be
++  // referentially stable when possible and to return the *same* value when the
++  // underlying data has not changed, otherwise React tears or loops. We satisfy
++  // that by caching and reusing the previous reference whenever the equality
++  // function says the derived output is unchanged.
++  const ref = React.useRef<ComputedRef<U>>(undefined as never)
++  if (ref.current === undefined) {
++    ref.current = createRef<U>()
++  }
++
++  // Reset the cache whenever the compute or equality function identity changes.
++  // Holding onto a value derived by a stale compute would return incorrect
++  // results, so we invalidate `hasValue` and force a fresh derivation.
++  const depsRef = React.useRef<{
++    compute: (state: ExtractState<S>) => U
++    equalityFn: (a: U, b: U) => boolean
++  }>(undefined as never)
++  if (
++    depsRef.current === undefined ||
++    depsRef.current.compute !== compute ||
++    depsRef.current.equalityFn !== equalityFn
++  ) {
++    depsRef.current = { compute, equalityFn }
++    ref.current = createRef<U>()
++  }
++
++  /**
++   * Shared derivation used by both the client and server snapshots. Given the
++   * current state, it recomputes the value and either returns the cached
++   * reference (when equal under `equalityFn`) or stores and returns the new
++   * value.
++   */
++  const derive = React.useCallback(
++    (state: ExtractState<S>): U => {
++      const cache = ref.current
++
++      // Fast path: identical state reference and an existing cached value means
++      // the derived output cannot have changed. This avoids invoking `compute`
++      // repeatedly for the many snapshot reads React performs per commit.
++      if (cache.hasValue && Object.is(cache.state, state)) {
++        return cache.value
++      }
++
++      const nextValue = compute(state)
++
++      if (cache.hasValue && equalityFn(cache.value, nextValue)) {
++        // Unchanged under the equality function: preserve the prior reference so
++        // React sees a stable snapshot and skips the re-render.
++        cache.state = state
++        return cache.value
++      }
++
++      cache.hasValue = true
++      cache.value = nextValue
++      cache.state = state
++      return nextValue
++    },
++    [compute, equalityFn],
++  )
++
++  const getSnapshot = React.useCallback(
++    () => derive(store.getState()),
++    [store, derive],
++  )
++
++  const getServerSnapshot = React.useCallback(
++    () => derive(store.getInitialState()),
++    [store, derive],
++  )
++
++  // `subscribe` is typed with a state argument, but `useSyncExternalStore`
++  // expects an arity-0 `onStoreChange` listener. The extra argument is simply
++  // ignored by the store, so the cast is safe.
++  const subscribe = React.useCallback(
++    (onStoreChange: () => void) =>
++      store.subscribe(onStoreChange as (state: ExtractState<S>) => void),
++    [store],
++  )
++
++  const slice = React.useSyncExternalStore(
++    subscribe,
++    getSnapshot,
++    getServerSnapshot,
++  )
++
++  React.useDebugValue(slice)
++  return slice
++}
++
++export default useComputed
+diff --git a/src/types.d.ts b/src/types.d.ts
+index f10fd4e..08baf7d 100644
+--- a/src/types.d.ts
++++ b/src/types.d.ts
+@@ -3,3 +3,68 @@ declare interface ImportMeta {
+     MODE: string
+   }
+ }
++
++/**
++ * Shared type-level helpers used by the computed middleware public signature.
++ *
++ * These aliases are declared globally (ambient) so that the middleware's public
++ * types can reference a single canonical implementation without importing it at
++ * runtime. They intentionally do not affect any existing public API surface or
++ * runtime behavior; they only provide precise inference for computed keys.
++ */
++
++/**
++ * Overlay the keys of `U` onto `T`. Keys present in `U` take precedence over
++ * base keys of the same name. The computed middleware relies on this to expose
++ * computed keys through `getState()`, selectors, and `subscribe` state while
++ * still preserving the untouched keys of the base state.
++ */
++declare type Write<T, U> = Omit<T, keyof U> & U
++
++/**
++ * Compute the union of keys shared between two object types. Used to reason
++ * about which base keys may be shadowed by computed keys.
++ */
++declare type SharedKeys<T, U> = Extract<keyof T, keyof U>
++
++/**
++ * Merge a base state `T` with computed keys `C`, ensuring that computed keys
++ * are always the read-only authoritative source for any overlapping key. This
++ * mirrors the runtime behavior where computed values are merged last inside the
++ * wrapped `setState` cycle.
++ */
++declare type MergeComputed<T, C> = Write<T, C>
++
++/**
++ * Extract the computed portion `C` produced by a `compute(state) => C` function
++ * signature. Retained as a shared helper so the middleware and any downstream
++ * type tests can reference a single canonical extractor.
++ */
++declare type ComputeResult<F> = F extends (state: any) => infer C ? C : never
++
++/**
++ * The equality function shape used for per-key referential stability of
++ * computed values. Defaults conceptually to `Object.is` at runtime; this type
++ * only constrains user-provided equality functions.
++ */
++declare type ComputedEqualityFn<C> = (
++  a: C[keyof C],
++  b: C[keyof C],
++) => boolean
++
++/**
++ * The list of base-state keys that gate recomputation. When present, the
++ * computed middleware only recomputes derived values if one of these keys
++ * changed (shallow compared). When absent, recomputation runs on every update.
++ */
++declare type ComputedTrackedKeys<C> = (keyof C)[]
++
++/**
++ * A readonly view of a state object with computed keys applied. This documents,
++ * at the type level, that computed keys must not be written directly by
++ * consumers because any such write is overridden by the recomputed value.
++ */
++declare type WithReadonlyComputed<T, C> = Write<
++  T,
++  { readonly [K in keyof C]: C[K] }
++>
+diff --git a/src/vanilla.ts b/src/vanilla.ts
+index a20f0f8..8551ac5 100644
+--- a/src/vanilla.ts
++++ b/src/vanilla.ts
+@@ -15,6 +15,60 @@ export interface StoreApi<T> {
+ 
+ export type ExtractState<S> = S extends { getState: () => infer T } ? T : never
+ 
++/**
++ * Shared internal types for the memoization core (`createComputeMemo`) that is
++ * implemented in `src/vanilla/shallow.ts` and consumed by both the `computed`
++ * middleware and the `useComputed` React hook.
++ *
++ * These types are exported so the middleware and the hook can describe the
++ * memoization contract precisely without duplicating the shape. They do not
++ * alter `StoreApi`, `createStore`, or any existing runtime behavior; they are
++ * purely additive type surface.
++ */
++
++/**
++ * A `ComputeFn` derives an object of computed values `C` from a base state `T`.
++ * It is invoked on every relevant update and its result is merged read-only
++ * into the store state by the middleware.
++ */
++export type ComputeFn<T, C extends object> = (state: T) => C
++
++/**
++ * The equality function used to decide whether an individual computed value has
++ * changed. When it returns `true`, the previous reference is preserved to keep
++ * referential stability. Defaults conceptually to `Object.is`.
++ */
++export type ComputeEqualityFn<C extends object> = (
++  a: C[keyof C],
++  b: C[keyof C],
++) => boolean
++
++/**
++ * The result of `createComputeMemo`: a function that, given the current base
++ * state, returns the merged computed object. Each call reuses the prior
++ * reference for keys whose recomputed value is equal under the configured
++ * equality function, and reuses the prior object entirely when nothing changed.
++ */
++export type ComputeMemo<T, C extends object> = (state: T) => C
++
++/**
++ * Factory signature for the shared memoization helper. Given a compute function
++ * and an optional equality function, it produces a {@link ComputeMemo}. The
++ * runtime implementation lives in `src/vanilla/shallow.ts`; this type mirrors it
++ * so callers can reference a single canonical signature.
++ */
++export type CreateComputeMemo = <T, C extends object>(
++  compute: ComputeFn<T, C>,
++  equalityFn?: ComputeEqualityFn<C>,
++) => ComputeMemo<T, C>
++
++/**
++ * Utility overlay type: write the keys of `U` onto `T`, letting `U` take
++ * precedence for any overlapping key. Shared here so the computed middleware
++ * and related type tests can reference a single canonical helper.
++ */
++export type WriteState<T, U> = Omit<T, keyof U> & U
++
+ type Get<T, K, F> = K extends keyof T ? T[K] : F
+ 
+ export type Mutate<S, Ms> = number extends Ms['length' & keyof Ms]
+diff --git a/src/vanilla/shallow.ts b/src/vanilla/shallow.ts
+index 2621ef8..8c238e9 100644
+--- a/src/vanilla/shallow.ts
++++ b/src/vanilla/shallow.ts
+@@ -72,3 +72,167 @@ export function shallow<T>(valueA: T, valueB: T): boolean {
+     { entries: () => Object.entries(valueB) },
+   )
+ }
++
++/**
++ * A `ComputeFn` derives an object of computed values `C` from a base state `T`.
++ * It is invoked on every relevant update and its result is merged (by the
++ * caller) into the store state.
++ */
++export type ComputeFn<T, C extends object> = (state: T) => C
++
++/**
++ * The equality function used to decide whether an individual computed value has
++ * changed. When it returns `true`, the previous reference is preserved so
++ * downstream selectors and React components keep referential stability.
++ */
++export type ComputeEqualityFn<C extends object> = (
++  a: C[keyof C],
++  b: C[keyof C],
++) => boolean
++
++/**
++ * The result of {@link createComputeMemo}: a function that, given the current
++ * base state, returns the merged computed object. Each call reuses the prior
++ * reference for keys whose recomputed value is equal under the configured
++ * equality function, and reuses the prior object entirely when nothing changed.
++ */
++export type ComputeMemo<T, C extends object> = (state: T) => C
++
++/**
++ * Enumerate the own enumerable string keys of a computed object. `for...in`
++ * would also walk the prototype chain; we intentionally restrict ourselves to
++ * own keys so inherited members of a class instance returned by `compute` are
++ * not treated as computed values.
++ */
++const ownKeys = <C extends object>(obj: C): (keyof C)[] =>
++  Object.keys(obj) as (keyof C)[]
++
++/**
++ * Decide whether two computed objects have identical key sets. A change in the
++ * set of keys (an added or removed computed key) is always treated as a change
++ * to the computed object identity, independent of the per-value equality check.
++ */
++const haveSameKeys = <C extends object>(prev: C, next: C): boolean => {
++  const prevKeys = ownKeys(prev)
++  const nextKeys = ownKeys(next)
++  if (prevKeys.length !== nextKeys.length) {
++    return false
++  }
++  for (let i = 0; i < nextKeys.length; i++) {
++    const key = nextKeys[i] as keyof C
++    // Presence check: a key with an `undefined` value still counts as present,
++    // so we use `in`/hasOwnProperty semantics rather than a truthiness test.
++    if (!Object.prototype.hasOwnProperty.call(prev, key)) {
++      return false
++    }
++  }
++  return true
++}
++
++/**
++ * Internal per-key memoization helper shared by the `computed` middleware and
++ * the `useComputed` React hook.
++ *
++ * Given a `compute` function and an `equalityFn`, it returns a merger that:
++ *
++ *   1. Recomputes the derived object from the current base state.
++ *   2. For each computed key, reuses the previous reference when the recomputed
++ *      value is equal under `equalityFn` (default `Object.is`).
++ *   3. Reuses the entire previous computed object when no key changed and the
++ *      key set is unchanged, so the whole computed slice keeps a stable
++ *      reference across updates.
++ *
++ * This is the single source of truth for computed referential stability so the
++ * store layer and the React layer behave identically and no logic is
++ * duplicated.
++ */
++export function createComputeMemo<T, C extends object>(
++  compute: ComputeFn<T, C>,
++  equalityFn: ComputeEqualityFn<C> = Object.is as ComputeEqualityFn<C>,
++): ComputeMemo<T, C> {
++  // The last computed object returned to the caller. `undefined` marks the very
++  // first invocation where there is nothing to compare against.
++  let previous: C | undefined
++
++  return (state: T): C => {
++    const next = compute(state)
++
++    // First run: nothing to reconcile, adopt the freshly computed object.
++    if (previous === undefined) {
++      previous = next
++      return next
++    }
++
++    const prev = previous
++
++    // Fast path: identical reference means the compute function returned the
++    // same object; there is nothing to reconcile.
++    if (Object.is(prev, next)) {
++      return prev
++    }
++
++    const keys = ownKeys(next)
++    const result = {} as C
++    let changed = false
++
++    for (let i = 0; i < keys.length; i++) {
++      const key = keys[i] as keyof C
++      const nextValue = next[key]
++      const hadKey = Object.prototype.hasOwnProperty.call(prev, key)
++      const prevValue = prev[key]
++
++      if (hadKey && equalityFn(prevValue, nextValue)) {
++        // Unchanged under the equality function: preserve the prior reference to
++        // keep referential stability for this key.
++        result[key] = prevValue
++      } else {
++        result[key] = nextValue
++        changed = true
++      }
++    }
++
++    // A removed key (present before, absent now) counts as a change even if all
++    // surviving keys were equal.
++    if (!changed && !haveSameKeys(prev, next)) {
++      changed = true
++    }
++
++    // When nothing changed, keep the previous object so the whole computed slice
++    // retains its reference; otherwise adopt the reconciled result.
++    previous = changed ? result : prev
++    return previous
++  }
++}
++
++/**
++ * A convenience wrapper that memoizes computed objects using {@link shallow} as
++ * the per-key equality function. This is used where the default per-value
++ * comparison should be structural rather than referential.
++ */
++export function createShallowComputeMemo<T, C extends object>(
++  compute: ComputeFn<T, C>,
++): ComputeMemo<T, C> {
++  return createComputeMemo(
++    compute,
++    shallow as unknown as ComputeEqualityFn<C>,
++  )
++}
++
++/**
++ * Reconcile a single value against a previous value using `equalityFn`,
++ * returning the previous reference when the two are considered equal. Exposed
++ * as a small primitive so the hook layer can reuse the exact same equality
++ * semantics for a scalar (non-object) derived value.
++ */
++export function preserveReference<U>(
++  prev: { hasValue: boolean; value: U },
++  next: U,
++  equalityFn: (a: U, b: U) => boolean,
++): U {
++  if (prev.hasValue && equalityFn(prev.value, next)) {
++    return prev.value
++  }
++  prev.hasValue = true
++  prev.value = next
++  return next
++}
