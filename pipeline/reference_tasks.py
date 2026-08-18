@@ -411,6 +411,10 @@ def operation_groups(repo: Path, design: dict) -> list[list[str]]:
         for index in range(existing_index, len(existing_files), 2)
     )
     groups = [group for group in groups if group]
+    # Keep each provider request scoped to one coherent group.  A model may
+    # otherwise append files from a later group when the final target list is
+    # long, which is rejected as an out-of-scope edit.  Smaller groups also
+    # make retries deterministic and reduce response truncation.
     return groups
 
 
@@ -533,6 +537,19 @@ def generate_operations(
         operation_paths = {str(operation.get("path", "")) for operation in group_operations}
         outside = sorted(operation_paths - set(target_files))
         missing = sorted(set(target_files) - operation_paths)
+        if outside and not missing:
+            # A long response can spill one or more edits from the next group
+            # into the current JSON object.  Since every required target in
+            # this group is present, discard only those out-of-scope extras;
+            # the next group will generate its own edits.  Never do this when
+            # a target is missing, because that would hide an incomplete
+            # implementation.
+            group_operations = [
+                operation for operation in group_operations
+                if str(operation.get("path", "")) in set(target_files)
+            ]
+            operation_paths = {str(operation.get("path", "")) for operation in group_operations}
+            outside = sorted(operation_paths - set(target_files))
         if outside or missing:
             shapes = [
                 sorted(operation) if isinstance(operation, dict) else type(operation).__name__
@@ -662,21 +679,32 @@ def process(
                 if operation.get("mode") == "create":
                     if target.exists():
                         current = target.read_text(encoding="utf-8")
-                        repaired = repair_operation(
-                            api_url,
-                            key,
-                            design,
-                            str(relative),
-                            current,
-                            operation,
-                            "create target already exists; convert the intended edit to an exact replacement",
-                        )
-                        if repaired.get("path") != str(relative) or repaired.get("mode") != "replace":
-                            raise ValueError(f"repair returned wrong path or mode for {relative}")
-                        old = str(repaired.get("old", "")); new = str(repaired.get("new", ""))
-                        if not old or old not in current:
-                            raise ValueError(f"replacement context not found after create-mode repair: {relative}")
-                        target.write_text(current.replace(old, new, 1), encoding="utf-8")
+                        try:
+                            repaired = repair_operation(
+                                api_url,
+                                key,
+                                design,
+                                str(relative),
+                                current,
+                                operation,
+                                "create target already exists; convert the intended edit to an exact replacement",
+                            )
+                            if repaired.get("path") != str(relative) or repaired.get("mode") != "replace":
+                                raise ValueError(f"repair returned wrong path or mode for {relative}")
+                            old = str(repaired.get("old", "")); new = str(repaired.get("new", ""))
+                            if not old or old not in current:
+                                raise ValueError(f"replacement context not found after create-mode repair: {relative}")
+                            target.write_text(current.replace(old, new, 1), encoding="utf-8")
+                        except (ValueError, RuntimeError, json.JSONDecodeError):
+                            # Some providers return a complete replacement as
+                            # `create` even when the target is present.  A
+                            # bounded whole-file fallback is safe here only
+                            # when the response includes substantial source
+                            # content; otherwise preserve the strict failure.
+                            content = str(operation.get("content", ""))
+                            if len(content.strip()) < 80 or "\x00" in content:
+                                raise
+                            target.write_text(content, encoding="utf-8")
                     else:
                         target.write_text(str(operation.get("content", "")), encoding="utf-8")
                 elif operation.get("mode") == "replace":
@@ -692,6 +720,16 @@ def process(
                     target.write_text(current.replace(old, new, 1), encoding="utf-8")
                 else:
                     raise ValueError(f"unsupported edit mode for {relative}")
+            # Providers occasionally preserve trailing spaces in generated
+            # source content. Normalize only whitespace at line ends before
+            # the strict git diff check; this cannot change runtime behavior.
+            for operation in operations:
+                path = worktree / Path(str(operation.get("path", "")))
+                if path.is_file():
+                    original = path.read_text(encoding="utf-8")
+                    normalized = "\n".join(line.rstrip() for line in original.split("\n"))
+                    if normalized != original:
+                        path.write_text(normalized, encoding="utf-8")
         run(["git", "diff", "--check"], worktree)
         # Stage before exporting so newly-created source files are included in
         # the binary patch. An unstaged `git diff` silently omits untracked files.
