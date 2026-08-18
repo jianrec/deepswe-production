@@ -9,7 +9,6 @@ QA is recorded and the task remains in ``qa/in_progress``.
 from __future__ import annotations
 
 import argparse
-import fcntl
 import hashlib
 import json
 import os
@@ -20,6 +19,8 @@ import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+
+from filelock import exclusive_lock
 
 
 def now() -> str:
@@ -38,16 +39,13 @@ def atomic_jsonl(path: Path, rows: list[dict]) -> None:
 
 def merge_manifest_row(path: Path, updated: dict) -> None:
     lock_path = path.parent / ".manifest.lock"
-    lock_path.touch(exist_ok=True)
-    with lock_path.open("r+") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+    with exclusive_lock(lock_path):
         rows = load_jsonl(path)
         current = next((row for row in rows if row.get("slot") == updated.get("slot")), None)
         if current is None:
             raise ValueError(f"manifest slot disappeared: {updated.get('slot')}")
         current.update(updated)
         atomic_jsonl(path, rows)
-        fcntl.flock(lock, fcntl.LOCK_UN)
 
 
 def append_jsonl(path: Path, row: dict) -> None:
