@@ -2,6 +2,9 @@
 .env
 .env.*
 !.env.example
+configs/providers.local.env
+configs/providers.local.env.*
+!configs/providers.local.env.example
 *.pem
 *.key
 

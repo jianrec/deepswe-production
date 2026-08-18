@@ -6,7 +6,11 @@
 chmod 600 /path/to/pack-strong.env /path/to/pack-weak.env
 ```
 
+可从 `configs/providers.local.env.example` 复制本地配置模板；真实 key 只放在仓库外的文件中，不提交 Git。
+
 ## 1. 初始化状态
+
+跨电脑推荐使用可提交的脱敏快照：原电脑执行 `python3 scripts/export_state.py`，新电脑执行 `python3 scripts/import_state.py`。只有正式输出中已存在且 finalized 的 task 会被恢复为 finalized；staging/worktree 中间状态会安全地重置到 `repository_discovery`。
 
 首次建立新的 500 槽位 manifest：
 
@@ -59,6 +63,10 @@ python3 pipeline/publish_task.py \
 
 `publish_task.py` 只接受 manifest 中 `finalized/finalized` 且 QA `passed=true` 的任务。它先验证，再原子复制到 `output/`。`--cleanup-docker` 只清理该 task 的容器和两个 task-specific image，不进行全局 prune。
 
+Oracle 必须三次全部通过。若出现 2/3，通过次数不足仍然是 QA 失败，不能删除测试、降低门槛或标记为 finalized。应保留测试并检查失败运行；若确认是临时 API/Docker 故障，只重跑失败的 QA，不能改变 task 资产。
+
+发布后如不再需要详细运行日志，可额外使用 `--cleanup-logs`；该选项只删除指定 task 的详细日志，正式输出中的 QA 摘要仍然保留。
+
 ## 5. 验证正式输出
 
 ```bash
@@ -85,3 +93,13 @@ harbor run \
 - 单 slot 必须依次经过 author → reference → hidden tests → QA → publish。
 - 初始最多两个 Docker QA 并发。
 - 不要并行运行仍使用整表写回 manifest 的旧阶段；完成单 slot merge 改造前，author/reference 阶段需要由一个调度器统一提交状态。
+
+## 7. 跨电脑统一入口
+
+```bash
+python3 scripts/doctor.py --root "$PWD" --env-file ../packy.env
+python3 scripts/import_state.py --root "$PWD"
+python3 scripts/produce.py --root "$PWD" --env-file ../packy.env --batch-size 1 --workers 1
+```
+
+`doctor.py` 只检查环境和配置；`import_state.py` 只恢复脱敏 registry；`produce.py` 才会调用模型和 Docker。先用 `--once` 做一轮 canary，再扩大 `--batch-size`/`--workers`。

@@ -282,9 +282,25 @@ def static_qa(root: Path, package: Path, row: dict) -> dict:
             raise ValueError(f"reference implementation omits PR-chain stages: {missing_stages}")
     if not 30 <= result["f2p_total"] <= 150 or not 100 <= result["p2p_total"] <= 1500:
         raise ValueError("F2P/P2P whitelist count is outside the production gate")
-    validation = run(["python3", str(root / "scripts/validate_task.py"), str(package)], root, check=False)
+    validator = next(
+        (
+            candidate
+            for candidate in (
+                root / "scripts/validate_task.py",
+                root / "pipeline/validate_task.py",
+            )
+            if candidate.is_file()
+        ),
+        None,
+    )
+    if validator is None:
+        raise FileNotFoundError("task validator is missing (expected scripts/validate_task.py or pipeline/validate_task.py)")
+    validation = run(["python3", str(validator), str(package)], root, check=False)
     result["static_validation"] = validation.returncode == 0
-    result["static_validation_output"] = (validation.stdout + validation.stderr)[-3000:]
+    validation_output = (validation.stdout + validation.stderr)[-3000:]
+    # QA evidence must be portable.  Do not embed the author's absolute
+    # checkout path in a published task report.
+    result["static_validation_output"] = validation_output.replace(str(root), "<production-root>")
     if validation.returncode:
         raise ValueError("static task validation failed")
     return result
@@ -296,8 +312,15 @@ def docker_available() -> bool:
     return run(["docker", "info"], check=False, timeout=20).returncode == 0
 
 
-def case_fingerprint(image: str, package: Path, model_patch: Path | None) -> str:
+def case_fingerprint(
+    image: str,
+    package: Path,
+    model_patch: Path | None,
+    expected_reward: int | None = None,
+) -> str:
     digest = hashlib.sha256(image.encode())
+    digest.update(b"\0expected-reward:")
+    digest.update(str(expected_reward).encode())
     for path in (
         package / "tests/test.patch",
         package / "tests/config.json",
@@ -398,16 +421,24 @@ def prepare_case_source(
     return volume
 
 
-def run_case(image: str, package: Path, model_patch: Path | None, case_dir: Path) -> dict:
-    fingerprint = case_fingerprint(image, package, model_patch)
+def run_case(
+    image: str,
+    package: Path,
+    model_patch: Path | None,
+    case_dir: Path,
+    expected_reward: int | None = None,
+) -> dict:
+    fingerprint = case_fingerprint(image, package, model_patch, expected_reward)
     metadata_path = case_dir / "case-input.json"
     reward_path = case_dir / "verifier/reward.json"
     if metadata_path.is_file() and reward_path.is_file():
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-        if metadata.get("fingerprint") == fingerprint:
+        reward = json.loads(reward_path.read_text(encoding="utf-8"))
+        reward_matches = expected_reward is None or reward.get("reward") == expected_reward
+        if metadata.get("fingerprint") == fingerprint and reward_matches:
             return {
                 "returncode": 0,
-                "reward": json.loads(reward_path.read_text(encoding="utf-8")),
+                "reward": reward,
                 "elapsed_seconds": metadata.get("elapsed_seconds", 0),
                 "stdout_tail": "Reused completed QA case with matching input fingerprint.",
                 "stderr_tail": "",
@@ -594,11 +625,12 @@ def create_mutants(root: Path, package: Path, row: dict, count: int) -> list[Pat
         "src/react/computed.ts": 200,
         "src/middleware/persist.ts": 100,
     }
-    # A file with only type declarations/comments is not a useful mutant even
-    # when the broad diff classifier sees `export` tokens.  Keep the explicit
-    # runtime set small for generated TypeScript tasks.
-    runtime_preferred = set(preferred)
-    candidates = [path for path in candidates if path in runtime_preferred]
+    # Prefer known high-value files for the TypeScript task family.  For other
+    # languages (Go, Rust, Java, ...), use the task's own runtime-bearing
+    # affected files instead of silently producing zero mutants.
+    preferred_candidates = [path for path in candidates if path in preferred]
+    if preferred_candidates:
+        candidates = preferred_candidates
     candidates.sort(
         key=lambda path: (preferred.get(path, 0), changed_lines_by_path.get(path, 0)),
         reverse=True,
@@ -645,7 +677,7 @@ def docker_qa(root: Path, package: Path, row: dict, repeats: int, mutant_count: 
     else:
         image_metadata = build_local_source_image(root, package, row, image)
     run_root = root / "logs/qa" / row["slot"]
-    base_preflight = run_case(image, package, None, run_root / "base-preflight")
+    base_preflight = run_case(image, package, None, run_root / "base-preflight", expected_reward=0)
     base_preflight_ok = bool(
         base_preflight.get("reward")
         and base_preflight["reward"].get("f2p_passed") == 0
@@ -666,10 +698,22 @@ def docker_qa(root: Path, package: Path, row: dict, repeats: int, mutant_count: 
             "mutant_ok": False,
             "passed": False,
         }
-    nop = [run_case(image, package, None, run_root / f"nop-{i:02d}") for i in range(1, repeats + 1)]
-    oracle = [run_case(image, package, package / "solution/solution.patch", run_root / f"oracle-{i:02d}") for i in range(1, repeats + 1)]
+    nop = [
+        run_case(image, package, None, run_root / f"nop-{i:02d}", expected_reward=0)
+        for i in range(1, repeats + 1)
+    ]
+    oracle = [
+        run_case(
+            image,
+            package,
+            package / "solution/solution.patch",
+            run_root / f"oracle-{i:02d}",
+            expected_reward=1,
+        )
+        for i in range(1, repeats + 1)
+    ]
     mutant_paths = create_mutants(root, package, row, mutant_count)
-    mutants = [run_case(image, package, path, run_root / path.stem) for path in mutant_paths]
+    mutants = [run_case(image, package, path, run_root / path.stem, expected_reward=0) for path in mutant_paths]
     nop_ok = all(x.get("reward") and x["reward"].get("reward") == 0 and x["reward"].get("f2p_passed") == 0 and x["reward"].get("p2p_passed") == x["reward"].get("p2p_total") for x in nop)
     oracle_ok = all(x.get("reward") and x["reward"].get("reward") == 1 and x["reward"].get("f2p_passed") == x["reward"].get("f2p_total") and x["reward"].get("p2p_passed") == x["reward"].get("p2p_total") for x in oracle)
     mutant_ok = len(mutants) >= 3 and all(x.get("reward") and x["reward"].get("reward") == 0 for x in mutants)
@@ -743,10 +787,19 @@ def main() -> None:
     parser.add_argument("--limit", type=int, default=1)
     parser.add_argument("--slot")
     parser.add_argument("--retry-failed", action="store_true")
-    parser.add_argument("--repeats", type=int, default=3)
+    parser.add_argument(
+        "--repeats",
+        type=int,
+        default=3,
+        help="number of NOP/Oracle repetitions; production requires at least 3",
+    )
     parser.add_argument("--mutants", type=int, default=4)
     parser.add_argument("--reuse-image", help="reuse a digest-pinned local-source QA image")
     args = parser.parse_args()
+    if args.repeats < 3:
+        parser.error("--repeats must be at least 3; a 2/3 Oracle result is not a passing QA result")
+    if args.mutants < 4:
+        parser.error("--mutants must be at least 4; production requires at least 3 valid mutants")
     args.root = args.root.resolve()
     manifest = args.root / "registry/task_manifest.jsonl"
     rows = load_jsonl(manifest)
@@ -758,7 +811,7 @@ def main() -> None:
     ][: args.limit]
     events = args.root / "registry/production-events.jsonl"
     for current in selected:
-        updated, event = finalize_one(args.root, current, max(3, args.repeats), max(4, args.mutants), args.reuse_image)
+        updated, event = finalize_one(args.root, current, args.repeats, args.mutants, args.reuse_image)
         append_jsonl(events, event)
         merge_manifest_row(manifest, updated)
         print(json.dumps({"slot": updated["slot"], "status": updated["status"], "stage": updated["stage"]}, ensure_ascii=False), flush=True)

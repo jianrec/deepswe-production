@@ -1,0 +1,47 @@
+schema_version = "1.3"
+artifacts = ["/logs/artifacts/model.patch"]
+
+[task]
+name = "rfc-7231-content-negotiation-accept-aware-re-0012"
+description = "RFC 7231 content negotiation: Accept-aware renderer registry and parameter-tolerant binding selection"
+authors = []
+keywords = []
+
+[metadata]
+task_id = "rfc-7231-content-negotiation-accept-aware-re-0012"
+display_title = "RFC 7231 content negotiation: Accept-aware renderer registry and parameter-tolerant binding selection"
+display_description = "Gin can render many response formats (JSON, XML, YAML, TOML, plain text) and select a request binder from the Content-Type header, but both selection paths are naive. `binding.Default(method, contentType)` switches on the *raw* Content-Type string, so a perfectly valid request header such as `application/json; charset=utf-8` fails to match `MIMEJSON` and silently falls back to form binding. On the response side there is no principled way to pick a renderer from the client's `Accept` header: `Con"
+original_title = "RFC 7231 content negotiation: Accept-aware renderer registry and parameter-tolerant binding selection"
+category = "feature_request"
+language = "go"
+repository = "gin-gonic/gin"
+repository_url = "https://github.com/gin-gonic/gin.git"
+base_commit_hash = "dcaa4296d111981ffb31ac3eba90bb63e1eb5ab9"
+
+[verifier]
+network_mode = "no-network"
+environment_mode = "separate"
+timeout_sec = 1800.0
+
+[verifier.env]
+[verifier.environment]
+build_timeout_sec = 1800.0
+cpus = 2
+memory_mb = 8192
+storage_mb = 20480
+
+[agent]
+network_mode = "no-network"
+timeout_sec = 5400.0
+
+[environment]
+build_timeout_sec = 1800.0
+docker_image = "deepswe-task-0012-environment:dcaa4296d111"
+cpus = 2
+memory_mb = 8192
+storage_mb = 20480
+gpus = 0
+mcp_servers = []
+
+[environment.env]
+[solution.env]

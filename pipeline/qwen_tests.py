@@ -99,6 +99,7 @@ def provider_name(api_url: str) -> str:
 def parse_responses_stream(raw: str) -> dict:
     completed = {}
     output_parts = []
+    output_items = []
     for line in raw.splitlines():
         if not line.startswith("data:"):
             continue
@@ -109,12 +110,24 @@ def parse_responses_stream(raw: str) -> dict:
         event_type = str(event.get("type") or "")
         if event_type == "response.output_text.delta" and event.get("delta"):
             output_parts.append(str(event["delta"]))
+        elif event_type == "response.output_text.done" and event.get("text"):
+            # Some gateways omit text deltas and emit only the completed text
+            # event. Do not discard that response body.
+            if not output_parts:
+                output_parts.append(str(event["text"]))
+        elif event_type == "response.output_item.done" and isinstance(event.get("item"), dict):
+            output_items.append(event["item"])
         elif event_type == "response.completed" and isinstance(event.get("response"), dict):
             completed = event["response"]
         elif event_type in {"response.failed", "response.error", "error"}:
             raise RuntimeError(json.dumps(event.get("error") or event, ensure_ascii=False)[:1800])
     if output_parts:
         completed["output_text"] = "".join(output_parts)
+    elif output_items:
+        completed["output"] = output_items
+    elif isinstance(completed.get("output_text"), str) and completed["output_text"].strip():
+        # Preserve a non-streamed output_text field from the completed object.
+        completed["output_text"] = completed["output_text"]
     if not completed:
         raise ValueError("Responses stream did not contain a completed response")
     return completed
@@ -830,9 +843,13 @@ def load_grader(root: Path) -> str:
     # the archive root stores authoring artifacts.  Prefer an archive-local
     # canonical grader when present, but fall back to the exported task root so
     # hidden-test generation remains resumable after the V1/V2 split.
-    canonical = root / "tasks" / "task-0001" / "tests" / "grader.py"
-    if not canonical.is_file():
-        canonical = root.parent / "tasks" / "task-0001" / "tests" / "grader.py"
+    candidates = (
+        root / "tasks" / "task-0001" / "tests" / "grader.py",
+        root / "output" / "task-0001" / "tests" / "grader.py",
+        root.parent / "tasks" / "task-0001" / "tests" / "grader.py",
+        root.parent / "output" / "task-0001" / "tests" / "grader.py",
+    )
+    canonical = next((path for path in candidates if path.is_file()), candidates[0])
     if not canonical.is_file():
         raise FileNotFoundError("canonical Harbor grader is missing")
     grader = canonical.read_text(encoding="utf-8")
@@ -917,6 +934,10 @@ def normalize_go_operation_paths(repo: Path, generated: dict) -> None:
     occupied = {str(operation.get("path", "")) for operation in operations}
     for operation in operations:
         path = str(operation.get("path", ""))
+        # The hidden-test author uses test_operations/ as an intentional
+        # package boundary so F2P files cannot poison base P2P compilation.
+        if path.replace("\\", "/").startswith("test_operations/"):
+            continue
         text = str(operation.get("content", "")) + str(operation.get("new", ""))
         match = re.search(r"^\s*package\s+([A-Za-z_][A-Za-z0-9_]*)", text, re.M)
         if not match or not path.endswith("_test.go"):
@@ -1213,6 +1234,20 @@ def process(
                         "named_tests": len(feature_ids),
                     }
                 )
+        if language == "go":
+            covered_feature_paths = command_test_paths(feature_test_paths, feature_command, language)
+            if set(covered_feature_paths) != set(feature_test_paths):
+                normalized_command, normalized_ids = go_feature_suite(verifier, feature_test_paths)
+                if normalized_command and len(normalized_ids) >= 40:
+                    feature_command = normalized_command
+                    feature_ids = normalized_ids
+                    event.setdefault("normalizations", []).append(
+                        {
+                            "kind": "rebuilt_go_feature_command_for_relocated_paths",
+                            "test_files": len(feature_test_paths),
+                            "named_tests": len(feature_ids),
+                        }
+                    )
         if len(feature_ids) < 40:
             raise ValueError(f"hidden feature tests expose fewer than 40 named cases: {len(feature_ids)}")
         covered_feature_paths = command_test_paths(feature_test_paths, feature_command, language)
@@ -1220,6 +1255,26 @@ def process(
             missing = sorted(set(feature_test_paths) - set(covered_feature_paths))
             raise ValueError(f"feature command does not cover every hidden test file: {missing}")
         if language == "go":
+            feature_directories = {str(Path(path).parent).replace("\\", "/") for path in feature_test_paths}
+            regression_candidates = [
+                path
+                for path in public_tests(verifier, language)
+                if path not in set(changed_test_paths)
+                and str(Path(path).parent).replace("\\", "/") not in feature_directories
+            ]
+            normalized_regression, _, _ = go_regression_suite(
+                verifier,
+                regression_candidates,
+                regression_command,
+            )
+            if normalized_regression:
+                regression_command = normalized_regression
+                event.setdefault("normalizations", []).append(
+                    {
+                        "kind": "rebuilt_go_regression_command_around_f2p_packages",
+                        "excluded_feature_directories": sorted(feature_directories),
+                    }
+                )
             validate_go_regression_isolation(feature_test_paths, regression_command)
         all_test_paths, regression_paths, regression_ids = regression_coverage(
             verifier,

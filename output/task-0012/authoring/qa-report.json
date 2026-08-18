@@ -1,0 +1,242 @@
+{
+  "status": "passed",
+  "checked_at": "2026-08-18T07:15:17.601358+00:00",
+  "static": {
+    "oracle_patch_apply": true,
+    "hidden_test_patch_apply": true,
+    "source_file_count": 8,
+    "changed_lines": 586,
+    "f2p_total": 45,
+    "p2p_total": 191,
+    "model_apply_stderr": "",
+    "test_apply_stderr": "",
+    "static_validation": true,
+    "static_validation_output": "{\"task\": \"<production-root>/tasks/task-0012\", \"valid\": true, \"errors\": []}\n"
+  },
+  "docker_available": true,
+  "docker": {
+    "network_mode": "no-network",
+    "image": "deepswe-task-0012-tests:dcaa4296d111",
+    "image_metadata": {
+      "build_mode": "local_pinned_checkout",
+      "build_elapsed_seconds": 14.193,
+      "verifier": {
+        "id": "sha256:01a5a059abde2845cba51948bc49cafaadf465555ff2c8eef39d0f40fa541761",
+        "repo_tags": [
+          "deepswe-task-0012-tests:dcaa4296d111"
+        ],
+        "labels": {
+          "deepswe.base_sha": "dcaa4296d111981ffb31ac3eba90bb63e1eb5ab9",
+          "deepswe.repository": "gin-gonic/gin",
+          "deepswe.source_mode": "local-pinned-checkout"
+        }
+      },
+      "environment": {
+        "id": "sha256:d9a156932487c80286f574b473a7d2a2499b7f7688de755648541705280aebac",
+        "repo_tags": [
+          "deepswe-task-0012-environment:dcaa4296d111"
+        ],
+        "labels": {
+          "deepswe.base_sha": "dcaa4296d111981ffb31ac3eba90bb63e1eb5ab9",
+          "deepswe.repository": "gin-gonic/gin",
+          "deepswe.source_mode": "local-pinned-checkout"
+        }
+      },
+      "hidden_test_isolation": true
+    },
+    "base_preflight": {
+      "returncode": 0,
+      "reward": {
+        "reward": 0,
+        "f2p_total": 45,
+        "f2p_passed": 0,
+        "p2p_total": 191,
+        "p2p_passed": 191,
+        "f2p": 0.0,
+        "p2p": 1.0,
+        "partial": 0.809322033898305
+      },
+      "elapsed_seconds": 21.407,
+      "stdout_tail": "Reused completed QA case with matching input fingerprint.",
+      "stderr_tail": "",
+      "reused": true
+    },
+    "base_preflight_ok": true,
+    "nop": [
+      {
+        "returncode": 0,
+        "reward": {
+          "reward": 0,
+          "f2p_total": 45,
+          "f2p_passed": 0,
+          "p2p_total": 191,
+          "p2p_passed": 191,
+          "f2p": 0.0,
+          "p2p": 1.0,
+          "partial": 0.809322033898305
+        },
+        "elapsed_seconds": 26.549,
+        "stdout_tail": "Reused completed QA case with matching input fingerprint.",
+        "stderr_tail": "",
+        "reused": true
+      },
+      {
+        "returncode": 0,
+        "reward": {
+          "reward": 0,
+          "f2p_total": 45,
+          "f2p_passed": 0,
+          "p2p_total": 191,
+          "p2p_passed": 191,
+          "f2p": 0.0,
+          "p2p": 1.0,
+          "partial": 0.809322033898305
+        },
+        "elapsed_seconds": 22.704,
+        "stdout_tail": "Reused completed QA case with matching input fingerprint.",
+        "stderr_tail": "",
+        "reused": true
+      },
+      {
+        "returncode": 0,
+        "reward": {
+          "reward": 0,
+          "f2p_total": 45,
+          "f2p_passed": 0,
+          "p2p_total": 191,
+          "p2p_passed": 191,
+          "f2p": 0.0,
+          "p2p": 1.0,
+          "partial": 0.809322033898305
+        },
+        "elapsed_seconds": 20.174,
+        "stdout_tail": "Reused completed QA case with matching input fingerprint.",
+        "stderr_tail": "",
+        "reused": true
+      }
+    ],
+    "oracle": [
+      {
+        "returncode": 0,
+        "reward": {
+          "reward": 1,
+          "f2p_total": 45,
+          "f2p_passed": 45,
+          "p2p_total": 191,
+          "p2p_passed": 191,
+          "f2p": 1.0,
+          "p2p": 1.0,
+          "partial": 1.0
+        },
+        "elapsed_seconds": 21.11,
+        "stdout_tail": "Reused completed QA case with matching input fingerprint.",
+        "stderr_tail": "",
+        "reused": true
+      },
+      {
+        "returncode": 0,
+        "reward": {
+          "reward": 1,
+          "f2p_total": 45,
+          "f2p_passed": 45,
+          "p2p_total": 191,
+          "p2p_passed": 191,
+          "f2p": 1.0,
+          "p2p": 1.0,
+          "partial": 1.0
+        },
+        "elapsed_seconds": 19.511,
+        "stdout_tail": "Reused completed QA case with matching input fingerprint.",
+        "stderr_tail": "",
+        "reused": true
+      },
+      {
+        "returncode": 0,
+        "reward": {
+          "reward": 1,
+          "f2p_total": 45,
+          "f2p_passed": 45,
+          "p2p_total": 191,
+          "p2p_passed": 191,
+          "f2p": 1.0,
+          "p2p": 1.0,
+          "partial": 1.0
+        },
+        "elapsed_seconds": 18.736,
+        "stdout_tail": "Reused completed QA case with matching input fingerprint.",
+        "stderr_tail": "",
+        "reused": true
+      }
+    ],
+    "mutants": [
+      {
+        "returncode": 0,
+        "reward": {
+          "reward": 0,
+          "f2p_total": 45,
+          "f2p_passed": 7,
+          "p2p_total": 191,
+          "p2p_passed": 0,
+          "f2p": 0.15555555555555556,
+          "p2p": 0.0,
+          "partial": 0.029661016949152543
+        },
+        "elapsed_seconds": 17.894,
+        "stdout_tail": "perations/gin/format_test.go.TestNegotiateFormatUsesGlobalWildcard\n    test case failed\n    The language-native test command failed; see the native log.\n[verifier] ✗ [f2p] test_operations/gin/format_test.go.TestNegotiateFormatReturnsEmptyWhenExcluded\n    test case failed\n    The language-native test command failed; see the native log.\n[verifier] ✗ [f2p] test_operations/gin/format_test.go.TestNegotiateFormatHonorsExplicitRejection\n    test case failed\n    The language-native test command failed; see the native log.\n[verifier] ✗ [f2p] test_operations/gin/format_test.go.TestNegotiateFormatPreservesOfferOrder\n    test case failed\n    The language-native test command failed; see the native log.\n[verifier] ✗ [f2p] test_operations/gin/negotiate_render_test.go.TestNegotiateRenderWritesJSON\n    test case failed\n    The language-native test command failed; see the native log.\n[verifier] ✗ [f2p] test_operations/gin/negotiate_render_test.go.TestNegotiateRenderWritesXML\n    test case failed\n    The language-native test command failed; see the native log.\n[verifier] ✗ [f2p] test_operations/gin/negotiate_render_test.go.TestNegotiateRenderReturnsNotAcceptable\n    test case failed\n    The language-native test command failed; see the native log.\n[verifier] ✗ [f2p] test_operations/gin/negotiate_render_test.go.TestNegotiateRenderUsesEngineNegotiator\n    test case failed\n    The language-native test command failed; see the native log.\n[verifier] ✗ [f2p] test_operations/gin/negotiate_render_test.go.TestNegotiateRenderUsesDefaultOffersWhenEngineUnset\n    test case failed\n    The language-native test command failed; see the native log.\n[verifier] ✗ [f2p] test_operations/gin/negotiate_render_test.go.TestNegotiateRenderExposesNotAcceptableError\n    test case failed\n    The language-native test command failed; see the native log.\n[verifier] ✗ [f2p] test_operations/render/negotiator_test.go.TestNewNegotiatorMatchesQuality\n    test case failed\n    The language-native test command failed; see the native log.\n[verifier] ✗ [f2p] test_operations/render/negotiator_test.go.TestNegotiatorMatchesWildcards\n    test case failed\n    The language-native test command failed; see the native log.\n[verifier] ✗ [f2p] test_operations/render/negotiator_test.go.TestNegotiatorRejectsUnacceptable\n    test case failed\n    The language-native test command failed; see the native log.\n[verifier] ✗ [f2p] test_operations/render/negotiator_test.go.TestNegotiatorOffersReturnsRegistry\n    test case failed\n    The language-native test command failed; see the native log.\n[verifier] ✗ [f2p] test_operations/render/negotiator_test.go.TestDefaultOffersContainJSONXMLYAML\n    test case failed\n    The language-native test command failed; see the native log.\n[verifier] ✗ [f2p] test_operations/render/negotiator_test.go.TestDefaultOffersMatchJSON\n    test case failed\n    The language-native test command failed; see the native log.\nP2P 0/191 pass 191 fail; F2P 7/45 pass 38 fail; PARTIAL 0.029661016949152543; BINARY 0\n",
+        "stderr_tail": ""
+      },
+      {
+        "returncode": 0,
+        "reward": {
+          "reward": 0,
+          "f2p_total": 45,
+          "f2p_passed": 40,
+          "p2p_total": 191,
+          "p2p_passed": 191,
+          "f2p": 0.8888888888888888,
+          "p2p": 1.0,
+          "partial": 0.9788135593220338
+        },
+        "elapsed_seconds": 18.596,
+        "stdout_tail": "[verifier] model.patch applied (16786 bytes)\n[verifier] Resetting files touched by test.patch\n[verifier] Applying test.patch\nfeature_rc=1 regression_rc=0\n[verifier] ===== FAILURES (5) =====\n[verifier] ✗ [f2p] test_operations/gin/api_boundary_test.go.TestNegotiateFormatHandlesMalformedAccept\n    test case failed\n    The language-native test command failed; see the native log.\n[verifier] ✗ [f2p] test_operations/gin/api_boundary_test.go.TestNegotiateFormatRanksSpecificRange\n    test case failed\n    The language-native test command failed; see the native log.\n[verifier] ✗ [f2p] test_operations/gin/format_test.go.TestNegotiateFormatUsesQuality\n    test case failed\n    The language-native test command failed; see the native log.\n[verifier] ✗ [f2p] test_operations/gin/format_test.go.TestNegotiateFormatReturnsEmptyWhenExcluded\n    test case failed\n    The language-native test command failed; see the native log.\n[verifier] ✗ [f2p] test_operations/gin/format_test.go.TestNegotiateFormatHonorsExplicitRejection\n    test case failed\n    The language-native test command failed; see the native log.\nP2P 191/191 pass 0 fail; F2P 40/45 pass 5 fail; PARTIAL 0.9788135593220338; BINARY 0\n",
+        "stderr_tail": ""
+      },
+      {
+        "returncode": 0,
+        "reward": {
+          "reward": 0,
+          "f2p_total": 45,
+          "f2p_passed": 21,
+          "p2p_total": 191,
+          "p2p_passed": 0,
+          "f2p": 0.4666666666666667,
+          "p2p": 0.0,
+          "partial": 0.08898305084745763
+        },
+        "elapsed_seconds": 17.07,
+        "stdout_tail": "perations/gin/format_test.go.TestNegotiateFormatUsesGlobalWildcard\n    test case failed\n    The language-native test command failed; see the native log.\n[verifier] ✗ [f2p] test_operations/gin/format_test.go.TestNegotiateFormatReturnsEmptyWhenExcluded\n    test case failed\n    The language-native test command failed; see the native log.\n[verifier] ✗ [f2p] test_operations/gin/format_test.go.TestNegotiateFormatHonorsExplicitRejection\n    test case failed\n    The language-native test command failed; see the native log.\n[verifier] ✗ [f2p] test_operations/gin/format_test.go.TestNegotiateFormatPreservesOfferOrder\n    test case failed\n    The language-native test command failed; see the native log.\n[verifier] ✗ [f2p] test_operations/gin/negotiate_render_test.go.TestNegotiateRenderWritesJSON\n    test case failed\n    The language-native test command failed; see the native log.\n[verifier] ✗ [f2p] test_operations/gin/negotiate_render_test.go.TestNegotiateRenderWritesXML\n    test case failed\n    The language-native test command failed; see the native log.\n[verifier] ✗ [f2p] test_operations/gin/negotiate_render_test.go.TestNegotiateRenderReturnsNotAcceptable\n    test case failed\n    The language-native test command failed; see the native log.\n[verifier] ✗ [f2p] test_operations/gin/negotiate_render_test.go.TestNegotiateRenderUsesEngineNegotiator\n    test case failed\n    The language-native test command failed; see the native log.\n[verifier] ✗ [f2p] test_operations/gin/negotiate_render_test.go.TestNegotiateRenderUsesDefaultOffersWhenEngineUnset\n    test case failed\n    The language-native test command failed; see the native log.\n[verifier] ✗ [f2p] test_operations/gin/negotiate_render_test.go.TestNegotiateRenderExposesNotAcceptableError\n    test case failed\n    The language-native test command failed; see the native log.\n[verifier] ✗ [f2p] test_operations/render/negotiator_test.go.TestNewNegotiatorMatchesQuality\n    test case failed\n    The language-native test command failed; see the native log.\n[verifier] ✗ [f2p] test_operations/render/negotiator_test.go.TestNegotiatorMatchesWildcards\n    test case failed\n    The language-native test command failed; see the native log.\n[verifier] ✗ [f2p] test_operations/render/negotiator_test.go.TestNegotiatorRejectsUnacceptable\n    test case failed\n    The language-native test command failed; see the native log.\n[verifier] ✗ [f2p] test_operations/render/negotiator_test.go.TestNegotiatorOffersReturnsRegistry\n    test case failed\n    The language-native test command failed; see the native log.\n[verifier] ✗ [f2p] test_operations/render/negotiator_test.go.TestDefaultOffersContainJSONXMLYAML\n    test case failed\n    The language-native test command failed; see the native log.\n[verifier] ✗ [f2p] test_operations/render/negotiator_test.go.TestDefaultOffersMatchJSON\n    test case failed\n    The language-native test command failed; see the native log.\nP2P 0/191 pass 191 fail; F2P 21/45 pass 24 fail; PARTIAL 0.08898305084745763; BINARY 0\n",
+        "stderr_tail": ""
+      },
+      {
+        "returncode": 0,
+        "reward": {
+          "reward": 0,
+          "f2p_total": 45,
+          "f2p_passed": 27,
+          "p2p_total": 191,
+          "p2p_passed": 191,
+          "f2p": 0.6,
+          "p2p": 1.0,
+          "partial": 0.923728813559322
+        },
+        "elapsed_seconds": 18.822,
+        "stdout_tail": "_test.go.TestNegotiateFormatHandlesMalformedAccept\n    test case failed\n    The language-native test command failed; see the native log.\n[verifier] ✗ [f2p] test_operations/gin/api_boundary_test.go.TestNegotiateFormatRanksSpecificRange\n    test case failed\n    The language-native test command failed; see the native log.\n[verifier] ✗ [f2p] test_operations/gin/api_boundary_test.go.TestNegotiateFormatDoesNotMatchDifferentType\n    test case failed\n    The language-native test command failed; see the native log.\n[verifier] ✗ [f2p] test_operations/gin/api_boundary_test.go.TestNegotiateFormatSupportsParameterizedAccept\n    test case failed\n    The language-native test command failed; see the native log.\n[verifier] ✗ [f2p] test_operations/gin/format_test.go.TestNegotiateFormatUsesQuality\n    test case failed\n    The language-native test command failed; see the native log.\n[verifier] ✗ [f2p] test_operations/gin/format_test.go.TestNegotiateFormatUsesSubtypeWildcard\n    test case failed\n    The language-native test command failed; see the native log.\n[verifier] ✗ [f2p] test_operations/gin/format_test.go.TestNegotiateFormatUsesGlobalWildcard\n    test case failed\n    The language-native test command failed; see the native log.\n[verifier] ✗ [f2p] test_operations/gin/format_test.go.TestNegotiateFormatReturnsEmptyWhenExcluded\n    test case failed\n    The language-native test command failed; see the native log.\n[verifier] ✗ [f2p] test_operations/gin/format_test.go.TestNegotiateFormatHonorsExplicitRejection\n    test case failed\n    The language-native test command failed; see the native log.\n[verifier] ✗ [f2p] test_operations/gin/format_test.go.TestNegotiateFormatPreservesOfferOrder\n    test case failed\n    The language-native test command failed; see the native log.\n[verifier] ✗ [f2p] test_operations/gin/negotiate_render_test.go.TestNegotiateRenderWritesJSON\n    test case failed\n    The language-native test command failed; see the native log.\n[verifier] ✗ [f2p] test_operations/gin/negotiate_render_test.go.TestNegotiateRenderWritesXML\n    test case failed\n    The language-native test command failed; see the native log.\n[verifier] ✗ [f2p] test_operations/gin/negotiate_render_test.go.TestNegotiateRenderReturnsNotAcceptable\n    test case failed\n    The language-native test command failed; see the native log.\n[verifier] ✗ [f2p] test_operations/gin/negotiate_render_test.go.TestNegotiateRenderUsesEngineNegotiator\n    test case failed\n    The language-native test command failed; see the native log.\n[verifier] ✗ [f2p] test_operations/gin/negotiate_render_test.go.TestNegotiateRenderUsesDefaultOffersWhenEngineUnset\n    test case failed\n    The language-native test command failed; see the native log.\n[verifier] ✗ [f2p] test_operations/gin/negotiate_render_test.go.TestNegotiateRenderExposesNotAcceptableError\n    test case failed\n    The language-native test command failed; see the native log.\nP2P 191/191 pass 0 fail; F2P 27/45 pass 18 fail; PARTIAL 0.923728813559322; BINARY 0\n",
+        "stderr_tail": ""
+      }
+    ],
+    "nop_ok": true,
+    "oracle_ok": true,
+    "mutant_ok": true,
+    "passed": true
+  }
+}

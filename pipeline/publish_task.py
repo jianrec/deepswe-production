@@ -94,12 +94,33 @@ def cleanup_workspaces(root: Path, row: dict) -> list[str]:
     return removed
 
 
+def cleanup_logs(root: Path, row: dict) -> list[str]:
+    """Remove verbose transient logs for one published slot only."""
+    slot = row["slot"]
+    targets = [
+        root / "logs/qa" / slot,
+        root / "logs/model-responses" / slot,
+        root / "logs/author-responses" / slot,
+    ]
+    removed: list[str] = []
+    for target in targets:
+        if target.exists():
+            shutil.rmtree(target)
+            removed.append(str(target.relative_to(root)))
+    return removed
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1])
     parser.add_argument("--slot", required=True)
     parser.add_argument("--cleanup-docker", action="store_true")
     parser.add_argument("--cleanup-workspaces", action="store_true")
+    parser.add_argument(
+        "--cleanup-logs",
+        action="store_true",
+        help="remove verbose transient QA/model logs for this published slot",
+    )
     parser.add_argument("--cleanup-staging", action="store_true")
     args = parser.parse_args()
     root = args.root.resolve()
@@ -135,6 +156,8 @@ def main() -> None:
         result["docker_cleanup"] = cleanup_docker(args.slot, str(row["base_commit_hash"]))
     if args.cleanup_workspaces:
         result["workspace_cleanup"] = cleanup_workspaces(root, row)
+    if args.cleanup_logs:
+        result["log_cleanup"] = cleanup_logs(root, row)
     if args.cleanup_staging:
         shutil.rmtree(source)
         result["staging_removed"] = True

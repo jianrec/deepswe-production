@@ -1,0 +1,62 @@
+{
+  "internal/accept.ParseAccept parses quality values, wildcards, and parameters, returning media ranges sorted by (quality desc, specificity desc, input order); malformed entries are skipped without panic.": [
+    "TestParseAcceptQualityOrdering",
+    "TestParseAcceptSpecificityOrdering",
+    "TestParseAcceptParameters",
+    "TestParseAcceptWildcardRanges",
+    "TestParseAcceptSkipsMalformedSegments",
+    "TestParseAcceptEmptyHeader"
+  ],
+  "internal/accept.Negotiate(header, offers) returns the best matching offer honoring q-values and wildcards, returns \"\" when the header is present but nothing is acceptable, and returns the first offer when the header is empty or \"/*/*\".": [
+    "TestNegotiateQualityPreference",
+    "TestNegotiateOfferOrderTieBreak",
+    "TestNegotiateRejectsZeroQualityOffer",
+    "TestNegotiateEmptyHeaderUsesFirstOffer"
+  ],
+  "A media range with q=0 never matches its media type even when a wildcard would otherwise apply.": [
+    "TestMediaRangeZeroQualityRejects",
+    "TestNegotiateRejectsZeroQualityOffer",
+    "TestNegotiateFormatHonorsExplicitRejection"
+  ],
+  "binding.Default and binding.Preferred match content types that carry parameters while preserving GET->Form and unknown->Form behavior.": [
+    "TestPreferredJSONParameters",
+    "TestPreferredXMLParameters",
+    "TestPreferredYAMLParameters",
+    "TestPreferredUnknownReturnsNil",
+    "TestDefaultParameterizedJSON",
+    "TestDefaultParameterizedFormFallsBack",
+    "TestDefaultGetStillUsesForm"
+  ],
+  "render.NewNegotiator / render.DefaultOffers build a registry whose Match returns the correct Offer for an Accept header and false when unacceptable.": [
+    "TestNewNegotiatorMatchesQuality",
+    "TestNegotiatorMatchesWildcards",
+    "TestNegotiatorRejectsUnacceptable",
+    "TestNegotiatorOffersReturnsRegistry",
+    "TestDefaultOffersContainJSONXMLYAML",
+    "TestDefaultOffersMatchJSON"
+  ],
+  "Context.NegotiateRender writes the negotiated representation with the requested status code and returns true on success.": [
+    "TestNegotiateRenderWritesJSON",
+    "TestNegotiateRenderWritesXML"
+  ],
+  "Context.NegotiateRender writes HTTP 406 and returns false when no offered media type is acceptable, and falls back to the engine default then render.DefaultOffers() when passed nil.": [
+    "TestNegotiateRenderReturnsNotAcceptable",
+    "TestNegotiateRenderUsesEngineNegotiator",
+    "TestNegotiateRenderUsesDefaultOffersWhenEngineUnset"
+  ],
+  "Context.NegotiateFormat honors q-values and wildcards and returns \"\" when the Accept header excludes every offered format.": [
+    "TestNegotiateFormatUsesQuality",
+    "TestNegotiateFormatUsesSubtypeWildcard",
+    "TestNegotiateFormatUsesGlobalWildcard",
+    "TestNegotiateFormatReturnsEmptyWhenExcluded",
+    "TestNegotiateFormatPreservesOfferOrder",
+    "TestNegotiateFormatRanksSpecificRange",
+    "TestNegotiateFormatDoesNotMatchDifferentType",
+    "TestNegotiateFormatSupportsParameterizedAccept"
+  ],
+  "The package compiles and all targeted tests pass under both the default build and the nomsgpack build tag.": [
+    "TestDefaultParameterizedJSON",
+    "TestNewNegotiatorMatchesQuality",
+    "TestNegotiateRenderWritesJSON"
+  ]
+}

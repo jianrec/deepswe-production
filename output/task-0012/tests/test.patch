@@ -1,0 +1,381 @@
+diff --git a/test_operations/accept/match_test.go b/test_operations/accept/match_test.go
+new file mode 100644
+index 0000000..41fcc14
+--- /dev/null
++++ b/test_operations/accept/match_test.go
+@@ -0,0 +1,63 @@
++package accept_test
++
++import (
++	"testing"
++
++	"github.com/gin-gonic/gin/internal/accept"
++)
++
++func TestMediaRangeMatchesExactType(t *testing.T) {
++	m := accept.ParseAccept("application/json")[0]
++	if !m.Matches("application/json") {
++		t.Fatal("exact media type did not match")
++	}
++}
++
++func TestMediaRangeMatchesSubtypeWildcard(t *testing.T) {
++	m := accept.ParseAccept("application/*")[0]
++	if !m.Matches("application/xml") || m.Matches("text/xml") {
++		t.Fatal("subtype wildcard matching is incorrect")
++	}
++}
++
++func TestMediaRangeMatchesGlobalWildcard(t *testing.T) {
++	m := accept.ParseAccept("*/*")[0]
++	if !m.Matches("text/plain") || !m.Matches("application/json") {
++		t.Fatal("global wildcard did not match")
++	}
++}
++
++func TestMediaRangeZeroQualityRejects(t *testing.T) {
++	m := accept.ParseAccept("application/json;q=0")[0]
++	if m.Matches("application/json") {
++		t.Fatal("zero-quality range matched")
++	}
++}
++
++func TestNegotiateQualityPreference(t *testing.T) {
++	got := accept.Negotiate("text/plain;q=0.4, application/json;q=0.8", []string{"text/plain", "application/json"})
++	if got != "application/json" {
++		t.Fatalf("got %q", got)
++	}
++}
++
++func TestNegotiateOfferOrderTieBreak(t *testing.T) {
++	got := accept.Negotiate("*/*;q=1", []string{"text/plain", "application/json"})
++	if got != "text/plain" {
++		t.Fatalf("got %q", got)
++	}
++}
++
++func TestNegotiateRejectsZeroQualityOffer(t *testing.T) {
++	got := accept.Negotiate("*/*;q=1, application/json;q=0", []string{"application/json", "text/plain"})
++	if got != "text/plain" {
++		t.Fatalf("got %q", got)
++	}
++}
++
++func TestNegotiateEmptyHeaderUsesFirstOffer(t *testing.T) {
++	got := accept.Negotiate("", []string{"application/json", "text/plain"})
++	if got != "application/json" {
++		t.Fatalf("got %q", got)
++	}
++}
+diff --git a/test_operations/accept/parse_test.go b/test_operations/accept/parse_test.go
+new file mode 100644
+index 0000000..3693aed
+--- /dev/null
++++ b/test_operations/accept/parse_test.go
+@@ -0,0 +1,48 @@
++package accept_test
++
++import (
++	"testing"
++
++	"github.com/gin-gonic/gin/internal/accept"
++)
++
++func TestParseAcceptQualityOrdering(t *testing.T) {
++	got := accept.ParseAccept("text/*;q=0.5, application/json;q=0.9, */*;q=0.1")
++	if len(got) != 3 || got[0].Type != "application" || got[0].Quality != 0.9 || got[1].Subtype != "*" || got[2].Type != "*" {
++		t.Fatalf("unexpected ranges: %#v", got)
++	}
++}
++
++func TestParseAcceptSpecificityOrdering(t *testing.T) {
++	got := accept.ParseAccept("*/*;q=1, application/*;q=1, application/json;q=1")
++	if len(got) != 3 || got[0].Subtype != "json" || got[1].Subtype != "*" || got[2].Type != "*" {
++		t.Fatalf("unexpected specificity order: %#v", got)
++	}
++}
++
++func TestParseAcceptParameters(t *testing.T) {
++	got := accept.ParseAccept("application/json; charset=utf-8; profile=compact;q=0.7")
++	if len(got) != 1 || got[0].Params["charset"] != "utf-8" || got[0].Params["profile"] != "compact" || got[0].Quality != 0.7 {
++		t.Fatalf("unexpected parsed parameters: %#v", got)
++	}
++}
++
++func TestParseAcceptWildcardRanges(t *testing.T) {
++	got := accept.ParseAccept("application/*, */*")
++	if len(got) != 2 || got[0].Type != "application" || got[0].Subtype != "*" || got[1].Type != "*" {
++		t.Fatalf("unexpected wildcards: %#v", got)
++	}
++}
++
++func TestParseAcceptSkipsMalformedSegments(t *testing.T) {
++	got := accept.ParseAccept("not-a-media-type, application/json;q=bad, text/plain")
++	if len(got) != 1 || got[0].Type != "text" || got[0].Subtype != "plain" {
++		t.Fatalf("malformed segments were not skipped: %#v", got)
++	}
++}
++
++func TestParseAcceptEmptyHeader(t *testing.T) {
++	if got := accept.ParseAccept(""); len(got) != 0 {
++		t.Fatalf("empty header produced ranges: %#v", got)
++	}
++}
+diff --git a/test_operations/binding/preferred_test.go b/test_operations/binding/preferred_test.go
+new file mode 100644
+index 0000000..13daff5
+--- /dev/null
++++ b/test_operations/binding/preferred_test.go
+@@ -0,0 +1,50 @@
++package binding_test
++
++import (
++	"net/http"
++	"testing"
++
++	"github.com/gin-gonic/gin/binding"
++)
++
++func TestPreferredJSONParameters(t *testing.T) {
++	if binding.Preferred("application/json; charset=utf-8") != binding.JSON {
++		t.Fatal("parameterized JSON was not preferred")
++	}
++}
++
++func TestPreferredXMLParameters(t *testing.T) {
++	if binding.Preferred("application/xml; charset=utf-8") != binding.XML {
++		t.Fatal("parameterized XML was not preferred")
++	}
++}
++
++func TestPreferredYAMLParameters(t *testing.T) {
++	if binding.Preferred("application/yaml; charset=utf-8") != binding.YAML {
++		t.Fatal("parameterized YAML was not preferred")
++	}
++}
++
++func TestPreferredUnknownReturnsNil(t *testing.T) {
++	if binding.Preferred("application/x-unknown") != nil {
++		t.Fatal("unknown type returned a binding")
++	}
++}
++
++func TestDefaultParameterizedJSON(t *testing.T) {
++	if binding.Default(http.MethodPost, "application/json; charset=utf-8") != binding.JSON {
++		t.Fatal("Default did not strip JSON parameters")
++	}
++}
++
++func TestDefaultParameterizedFormFallsBack(t *testing.T) {
++	if binding.Default(http.MethodPost, "application/x-www-form-urlencoded; charset=utf-8") != binding.Form {
++		t.Fatal("parameterized form did not preserve form binding")
++	}
++}
++
++func TestDefaultGetStillUsesForm(t *testing.T) {
++	if binding.Default(http.MethodGet, "application/json; charset=utf-8") != binding.Form {
++		t.Fatal("GET did not preserve form binding")
++	}
++}
+diff --git a/test_operations/gin/api_boundary_test.go b/test_operations/gin/api_boundary_test.go
+new file mode 100644
+index 0000000..1729536
+--- /dev/null
++++ b/test_operations/gin/api_boundary_test.go
+@@ -0,0 +1,39 @@
++package gin_test
++
++import (
++	"net/http/httptest"
++	"testing"
++
++	"github.com/gin-gonic/gin"
++	"github.com/gin-gonic/gin/render"
++)
++
++func TestEngineNegotiatorFieldIsConfigurable(t *testing.T) {
++	engine := gin.New(); negotiator := render.NewNegotiator(render.DefaultOffers()...); engine.Negotiator = negotiator
++	if engine.Negotiator != negotiator { t.Fatal("engine negotiator was not retained") }
++}
++
++func TestNegotiateFormatHandlesEmptyAccept(t *testing.T) {
++	c, _ := gin.CreateTestContext(httptest.NewRecorder()); c.Request = httptest.NewRequest("GET", "/", nil)
++	if got := c.NegotiateFormat("application/json", "text/plain"); got != "application/json" { t.Fatalf("got %q", got) }
++}
++
++func TestNegotiateFormatHandlesMalformedAccept(t *testing.T) {
++	c, _ := gin.CreateTestContext(httptest.NewRecorder()); c.Request = httptest.NewRequest("GET", "/", nil); c.Request.Header.Set("Accept", "broken, text/plain;q=0")
++	if got := c.NegotiateFormat("text/plain"); got != "" { t.Fatalf("got %q", got) }
++}
++
++func TestNegotiateFormatRanksSpecificRange(t *testing.T) {
++	c, _ := gin.CreateTestContext(httptest.NewRecorder()); c.Request = httptest.NewRequest("GET", "/", nil); c.Request.Header.Set("Accept", "*/*;q=1, application/json;q=1")
++	if got := c.NegotiateFormat("text/plain", "application/json"); got != "application/json" { t.Fatalf("got %q", got) }
++}
++
++func TestNegotiateFormatDoesNotMatchDifferentType(t *testing.T) {
++	c, _ := gin.CreateTestContext(httptest.NewRecorder()); c.Request = httptest.NewRequest("GET", "/", nil); c.Request.Header.Set("Accept", "application/*")
++	if got := c.NegotiateFormat("text/plain"); got != "" { t.Fatalf("got %q", got) }
++}
++
++func TestNegotiateFormatSupportsParameterizedAccept(t *testing.T) {
++	c, _ := gin.CreateTestContext(httptest.NewRecorder()); c.Request = httptest.NewRequest("GET", "/", nil); c.Request.Header.Set("Accept", "application/json; profile=compact")
++	if got := c.NegotiateFormat("application/json"); got != "application/json" { t.Fatalf("got %q", got) }
++}
+diff --git a/test_operations/gin/format_test.go b/test_operations/gin/format_test.go
+new file mode 100644
+index 0000000..adbaab9
+--- /dev/null
++++ b/test_operations/gin/format_test.go
+@@ -0,0 +1,34 @@
++package gin_test
++
++import (
++	"net/http/httptest"
++	"testing"
++
++	"github.com/gin-gonic/gin"
++)
++
++func contextWithAccept(accept string) *gin.Context { c, _ := gin.CreateTestContext(httptest.NewRecorder()); c.Request = httptest.NewRequest("GET", "/", nil); c.Request.Header.Set("Accept", accept); return c }
++
++func TestNegotiateFormatUsesQuality(t *testing.T) {
++	if got := contextWithAccept("text/plain;q=0.2, application/json;q=0.9").NegotiateFormat("text/plain", "application/json"); got != "application/json" { t.Fatalf("got %q", got) }
++}
++
++func TestNegotiateFormatUsesSubtypeWildcard(t *testing.T) {
++	if got := contextWithAccept("application/*").NegotiateFormat("text/plain", "application/json"); got != "application/json" { t.Fatalf("got %q", got) }
++}
++
++func TestNegotiateFormatUsesGlobalWildcard(t *testing.T) {
++	if got := contextWithAccept("*/*").NegotiateFormat("application/json", "text/plain"); got != "application/json" { t.Fatalf("got %q", got) }
++}
++
++func TestNegotiateFormatReturnsEmptyWhenExcluded(t *testing.T) {
++	if got := contextWithAccept("text/plain;q=0").NegotiateFormat("text/plain"); got != "" { t.Fatalf("got %q", got) }
++}
++
++func TestNegotiateFormatHonorsExplicitRejection(t *testing.T) {
++	if got := contextWithAccept("*/*;q=1, application/json;q=0").NegotiateFormat("application/json"); got != "" { t.Fatalf("got %q", got) }
++}
++
++func TestNegotiateFormatPreservesOfferOrder(t *testing.T) {
++	if got := contextWithAccept("application/*;q=1").NegotiateFormat("application/xml", "application/json"); got != "application/xml" { t.Fatalf("got %q", got) }
++}
+diff --git a/test_operations/gin/negotiate_render_test.go b/test_operations/gin/negotiate_render_test.go
+new file mode 100644
+index 0000000..296506c
+--- /dev/null
++++ b/test_operations/gin/negotiate_render_test.go
+@@ -0,0 +1,53 @@
++package gin_test
++
++import (
++	"encoding/xml"
++	"net/http"
++	"net/http/httptest"
++	"testing"
++
++	"github.com/gin-gonic/gin"
++	"github.com/gin-gonic/gin/render"
++)
++
++type xmlPayload struct {
++	XMLName xml.Name `xml:"item"`
++	OK      string   `xml:"ok"`
++}
++
++// The root element makes the XML renderer input valid for encoding/xml.
++
++func TestNegotiateRenderWritesJSON(t *testing.T) {
++	r := httptest.NewRecorder(); c, _ := gin.CreateTestContext(r); c.Request = httptest.NewRequest("GET", "/", nil); c.Request.Header.Set("Accept", "application/json")
++	if !c.NegotiateRender(http.StatusCreated, map[string]string{"ok": "yes"}, render.NewNegotiator(render.DefaultOffers()...)) { t.Fatal("negotiation failed") }
++	if r.Code != http.StatusCreated || r.Header().Get("Content-Type") == "" { t.Fatalf("unexpected response: %d %q", r.Code, r.Header().Get("Content-Type")) }
++}
++
++func TestNegotiateRenderWritesXML(t *testing.T) {
++	r := httptest.NewRecorder(); c, _ := gin.CreateTestContext(r); c.Request = httptest.NewRequest("GET", "/", nil); c.Request.Header.Set("Accept", "application/xml")
++	if !c.NegotiateRender(http.StatusAccepted, xmlPayload{OK: "yes"}, render.NewNegotiator(render.DefaultOffers()...)) { t.Fatal("negotiation failed") }
++	if r.Code != http.StatusAccepted || r.Header().Get("Content-Type") == "" { t.Fatalf("unexpected response: %d", r.Code) }
++}
++
++func TestNegotiateRenderReturnsNotAcceptable(t *testing.T) {
++	r := httptest.NewRecorder(); c, _ := gin.CreateTestContext(r); c.Request = httptest.NewRequest("GET", "/", nil); c.Request.Header.Set("Accept", "image/png")
++	if c.NegotiateRender(http.StatusOK, "value", render.NewNegotiator(render.DefaultOffers()...)) { t.Fatal("unexpected successful negotiation") }
++	if r.Code != http.StatusNotAcceptable { t.Fatalf("got status %d", r.Code) }
++}
++
++func TestNegotiateRenderUsesEngineNegotiator(t *testing.T) {
++	router := gin.New(); router.Negotiator = render.NewNegotiator(render.Offer{MediaType: "application/json", Factory: func(data any) render.Render { return &render.JSON{Data: data} }})
++	router.GET("/", func(c *gin.Context) { if !c.NegotiateRender(http.StatusOK, "value", nil) { t.Fatal("negotiation failed") } })
++	r := httptest.NewRecorder(); req := httptest.NewRequest("GET", "/", nil); req.Header.Set("Accept", "application/json"); router.ServeHTTP(r, req)
++	if r.Code != http.StatusOK { t.Fatalf("got status %d", r.Code) }
++}
++
++func TestNegotiateRenderUsesDefaultOffersWhenEngineUnset(t *testing.T) {
++	router := gin.New(); router.GET("/", func(c *gin.Context) { if !c.NegotiateRender(http.StatusOK, map[string]string{"ok": "yes"}, nil) { t.Fatal("negotiation failed") } })
++	r := httptest.NewRecorder(); req := httptest.NewRequest("GET", "/", nil); req.Header.Set("Accept", "application/json"); router.ServeHTTP(r, req)
++	if r.Code != http.StatusOK { t.Fatalf("got status %d", r.Code) }
++}
++
++func TestNegotiateRenderExposesNotAcceptableError(t *testing.T) {
++	if gin.ErrNotAcceptable == nil || gin.ErrNotAcceptable.Error() != "gin: no acceptable content type offered" { t.Fatal("unexpected error value") }
++}
+diff --git a/test_operations/render/negotiator_test.go b/test_operations/render/negotiator_test.go
+new file mode 100644
+index 0000000..54c83dc
+--- /dev/null
++++ b/test_operations/render/negotiator_test.go
+@@ -0,0 +1,52 @@
++package render_test
++
++import (
++	"testing"
++
++	"github.com/gin-gonic/gin/render"
++)
++
++func TestNewNegotiatorMatchesQuality(t *testing.T) {
++	n := render.NewNegotiator(render.Offer{MediaType: "application/json", Factory: func(data any) render.Render { return &render.JSON{Data: data} }}, render.Offer{MediaType: "text/plain", Factory: func(data any) render.Render { return &render.String{Format: "%v", Data: []any{data}} }})
++	got, ok := n.Match("text/plain;q=0.2, application/json;q=0.9")
++	if !ok || got.MediaType != "application/json" || got.Factory == nil {
++		t.Fatalf("unexpected offer: %#v %v", got, ok)
++	}
++}
++
++func TestNegotiatorMatchesWildcards(t *testing.T) {
++	n := render.NewNegotiator(render.Offer{MediaType: "application/json", Factory: func(data any) render.Render { return &render.JSON{Data: data} }})
++	got, ok := n.Match("application/*")
++	if !ok || got.MediaType != "application/json" {
++		t.Fatalf("unexpected offer: %#v %v", got, ok)
++	}
++}
++
++func TestNegotiatorRejectsUnacceptable(t *testing.T) {
++	n := render.NewNegotiator(render.Offer{MediaType: "application/json", Factory: func(data any) render.Render { return &render.JSON{Data: data} }})
++	if _, ok := n.Match("text/plain"); ok {
++		t.Fatal("unacceptable media type matched")
++	}
++}
++
++func TestNegotiatorOffersReturnsRegistry(t *testing.T) {
++	offers := []render.Offer{{MediaType: "application/custom", Factory: func(data any) render.Render { return &render.JSON{Data: data} }}}
++	got := render.NewNegotiator(offers...).Offers()
++	if len(got) != 1 || got[0].MediaType != offers[0].MediaType || got[0].Factory == nil {
++		t.Fatalf("unexpected offers: %#v", got)
++	}
++}
++
++func TestDefaultOffersContainJSONXMLYAML(t *testing.T) {
++	seen := map[string]bool{}
++	for _, offer := range render.DefaultOffers() { seen[offer.MediaType] = offer.Factory != nil }
++	for _, mediaType := range []string{"application/json", "application/xml", "application/yaml", "application/toml", "text/plain"} {
++		if !seen[mediaType] { t.Fatalf("missing default offer %q", mediaType) }
++	}
++}
++
++func TestDefaultOffersMatchJSON(t *testing.T) {
++	n := render.NewNegotiator(render.DefaultOffers()...)
++	got, ok := n.Match("application/json")
++	if !ok || got.MediaType != "application/json" { t.Fatalf("unexpected offer: %#v %v", got, ok) }
++}

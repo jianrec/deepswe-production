@@ -1,0 +1,7 @@
+{
+  "mode": "local-pinned-checkout",
+  "repository": "gin-gonic/gin",
+  "base_commit_hash": "dcaa4296d111981ffb31ac3eba90bb63e1eb5ab9",
+  "cache_path": "workspaces/repositories/gin-gonic__gin",
+  "remote_fetch_in_dockerfile": false
+}

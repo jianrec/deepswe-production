@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-08-18T09:11:14.138803+00:00",
+  "manifest_rows": 489,
+  "finalized_rows": 1,
+  "candidate_rows": 129,
+  "portable": true,
+  "transient_stages_reset": true,
+  "source": "registry/task_manifest.jsonl"
+}

@@ -1,0 +1,731 @@
+diff --git a/binding/binding.go b/binding/binding.go
+index eced0ae..41ae140 100644
+--- a/binding/binding.go
++++ b/binding/binding.go
+@@ -6,7 +6,10 @@
+ 
+ package binding
+ 
+-import "net/http"
++import (
++	"mime"
++	"net/http"
++)
+ 
+ // Content-Type MIME of the most common data formats.
+ const (
+@@ -91,13 +94,25 @@ var (
+ )
+ 
+ // Default returns the appropriate Binding instance based on the HTTP method
+-// and the content type.
++// and the content type. Media-type parameters (e.g. "; charset=utf-8") are
++// stripped before matching, so "application/json; charset=utf-8" still binds
++// as JSON. Unknown content types (and GET requests) fall back to Form.
+ func Default(method, contentType string) Binding {
+ 	if method == http.MethodGet {
+ 		return Form
+ 	}
+ 
+-	switch contentType {
++	if b := Preferred(contentType); b != nil {
++		return b
++	}
++	return Form
++}
++
++// Preferred returns the Binding that matches the given content type, tolerating
++// any media-type parameters that may be present. It returns nil when the
++// content type is not recognized.
++func Preferred(contentType string) Binding {
++	switch mediaType(contentType) {
+ 	case MIMEJSON:
+ 		return JSON
+ 	case MIMEXML, MIMEXML2:
+@@ -114,9 +129,22 @@ func Default(method, contentType string) Binding {
+ 		return FormMultipart
+ 	case MIMEBSON:
+ 		return BSON
+-	default: // case MIMEPOSTForm:
+-		return Form
++	default:
++		return nil
++	}
++}
++
++// mediaType strips any parameters from a Content-Type value, returning just the
++// media type. If the value cannot be parsed it is returned unchanged so exact
++// matching still works.
++func mediaType(contentType string) string {
++	if contentType == "" {
++		return contentType
++	}
++	if mt, _, err := mime.ParseMediaType(contentType); err == nil {
++		return mt
+ 	}
++	return contentType
+ }
+ 
+ func validate(obj any) error {
+diff --git a/binding/binding_nomsgpack.go b/binding/binding_nomsgpack.go
+index ae364d7..a980415 100644
+--- a/binding/binding_nomsgpack.go
++++ b/binding/binding_nomsgpack.go
+@@ -6,7 +6,10 @@
+ 
+ package binding
+ 
+-import "net/http"
++import (
++	"mime"
++	"net/http"
++)
+ 
+ // Content-Type MIME of the most common data formats.
+ const (
+@@ -87,13 +90,25 @@ var (
+ )
+ 
+ // Default returns the appropriate Binding instance based on the HTTP method
+-// and the content type.
++// and the content type. Media-type parameters (e.g. "; charset=utf-8") are
++// stripped before matching, so "application/json; charset=utf-8" still binds
++// as JSON. Unknown content types (and GET requests) fall back to Form.
+ func Default(method, contentType string) Binding {
+-	if method == "GET" {
++	if method == http.MethodGet {
+ 		return Form
+ 	}
+ 
+-	switch contentType {
++	if b := Preferred(contentType); b != nil {
++		return b
++	}
++	return Form
++}
++
++// Preferred returns the Binding that matches the given content type, tolerating
++// any media-type parameters that may be present. It returns nil when the
++// content type is not recognized.
++func Preferred(contentType string) Binding {
++	switch mediaType(contentType) {
+ 	case MIMEJSON:
+ 		return JSON
+ 	case MIMEXML, MIMEXML2:
+@@ -108,9 +123,22 @@ func Default(method, contentType string) Binding {
+ 		return TOML
+ 	case MIMEBSON:
+ 		return BSON
+-	default: // case MIMEPOSTForm:
+-		return Form
++	default:
++		return nil
++	}
++}
++
++// mediaType strips any parameters from a Content-Type value, returning just the
++// media type. If the value cannot be parsed it is returned unchanged so exact
++// matching still works.
++func mediaType(contentType string) string {
++	if contentType == "" {
++		return contentType
++	}
++	if mt, _, err := mime.ParseMediaType(contentType); err == nil {
++		return mt
+ 	}
++	return contentType
+ }
+ 
+ func validate(obj any) error {
+diff --git a/context.go b/context.go
+index 1dc730e..261f253 100644
+--- a/context.go
++++ b/context.go
+@@ -12,6 +12,7 @@ import (
+ 	"log"
+ 	"maps"
+ 	"math"
++	"mime"
+ 	"mime/multipart"
+ 	"net"
+ 	"net/http"
+@@ -24,6 +25,7 @@ import (
+ 
+ 	"github.com/gin-contrib/sse"
+ 	"github.com/gin-gonic/gin/binding"
++	"github.com/gin-gonic/gin/internal/accept"
+ 	"github.com/gin-gonic/gin/render"
+ )
+ 
+@@ -1446,35 +1448,131 @@ func (c *Context) Negotiate(code int, config Negotiate) {
+ 	}
+ }
+ 
+-// NegotiateFormat returns an acceptable Accept format.
++// negotiateSpecificity ranks a parsed media range for content negotiation: a
++// fully specified "type/subtype" (2) is more specific than "type/*" (1), which
++// is more specific than "*/*" (0). It mirrors the ranking used by the shared
++// internal/accept engine so that Context.NegotiateFormat and render negotiation
++// agree on which Accept entry wins when several match the same offer.
++func negotiateSpecificity(m accept.MediaRange) int {
++	if m.Type == "*" {
++		return 0
++	}
++	if m.Subtype == "*" || m.Subtype == "" {
++		return 1
++	}
++	return 2
++}
++
++// negotiateStructuralMatch reports whether the given media type is matched by
++// the media range's type/subtype (honoring wildcards), ignoring the quality
++// value. The quality is examined separately so an explicit "q=0" on a more
++// specific range can veto a match that a broader wildcard would otherwise
++// allow — the behavior required by RFC 7231 content negotiation.
++func negotiateStructuralMatch(m accept.MediaRange, mediaType string) bool {
++	mt := mediaType
++	if parsed, _, err := mime.ParseMediaType(mediaType); err == nil {
++		mt = parsed
++	}
++	typ, sub := mt, ""
++	if slash := strings.IndexByte(mt, '/'); slash >= 0 {
++		typ, sub = mt[:slash], mt[slash+1:]
++	}
++	if typ == "" {
++		return false
++	}
++	if m.Type == "*" {
++		return true
++	}
++	if !strings.EqualFold(m.Type, typ) {
++		return false
++	}
++	if m.Subtype == "*" || m.Subtype == "" {
++		return true
++	}
++	return strings.EqualFold(m.Subtype, sub)
++}
++
++// NegotiateFormat returns an acceptable Accept format for the request. It
++// honors the quality ("q=") values and media-range wildcards of the client's
++// Accept header through the shared internal/accept engine, so applications no
++// longer have to reimplement Accept parsing by hand.
++//
++// Formats explicitly whitelisted through SetAccepted (exposed as
++// Context.Accepted) take precedence over the request header: when present they
++// are ranked instead of the raw Accept header, preserving the historical
++// behavior where a manually accepted list overrides whatever the client sent.
++//
++// The return type is unchanged for backward compatibility. An empty Accept
++// header — or one that is exactly "*/*" — yields the first offered format,
++// while a header that structurally excludes every offer (or assigns them all
++// q=0) yields the empty string.
+ func (c *Context) NegotiateFormat(offered ...string) string {
+ 	assert1(len(offered) > 0, "you must provide at least one offer")
+ 
+-	if c.Accepted == nil {
+-		c.Accepted = parseAccept(c.requestHeader("Accept"))
++	header := c.requestHeader("Accept")
++	if len(c.Accepted) > 0 {
++		header = strings.Join(c.Accepted, ",")
++	}
++
++	header = strings.TrimSpace(header)
++	if header == "" || header == "*/*" {
++		return offered[0]
+ 	}
+-	if len(c.Accepted) == 0 {
++
++	ranges := accept.ParseAccept(header)
++	if len(ranges) == 0 {
+ 		return offered[0]
+ 	}
+-	for _, accepted := range c.Accepted {
++
++	bestOffer := ""
++	bestQuality := 0.0
++	bestSpecificity := -1
++	for _, offer := range offered {
++		// Select the most specific range that structurally matches this offer;
++		// its quality (which may be 0, i.e. an explicit rejection) governs
++		// whether the offer is acceptable at all.
++		spec := -1
++		quality := 0.0
++		matched := false
++		for i := range ranges {
++			if !negotiateStructuralMatch(ranges[i], offer) {
++				continue
++			}
++			if s := negotiateSpecificity(ranges[i]); s > spec {
++				spec = s
++				quality = ranges[i].Quality
++				matched = true
++			}
++		}
++		if !matched || quality <= 0 {
++			continue
++		}
++		if quality > bestQuality || (quality == bestQuality && spec > bestSpecificity) {
++			bestQuality = quality
++			bestSpecificity = spec
++			bestOffer = offer
++		}
++	}
++	if bestOffer == "" && strings.Contains(header, "/*") {
+ 		for _, offer := range offered {
+-			// According to RFC 2616 and RFC 2396, non-ASCII characters are not allowed in headers,
+-			// therefore we can just iterate over the string without casting it into []rune
+-			i := 0
+-			for ; i < len(accepted) && i < len(offer); i++ {
+-				if accepted[i] == '*' || offer[i] == '*' {
+-					return offer
+-				}
+-				if accepted[i] != offer[i] {
+-					break
++			if offer == "*/*" {
++				for _, accepted := range ranges {
++					if accepted.Quality > 0 {
++						return offer
++					}
+ 				}
+ 			}
+-			if i == len(accepted) {
+-				return offer
++			if strings.HasSuffix(offer, "/*") {
++				typ := strings.TrimSuffix(offer, "/*")
++				for _, accepted := range ranges {
++					if accepted.Quality > 0 && (accepted.Type == typ || accepted.Type == "*") {
++						return offer
++					}
++				}
+ 			}
+ 		}
+ 	}
+-	return ""
++	return bestOffer
+ }
+ 
+ // SetAccepted sets Accept header data.
+diff --git a/gin.go b/gin.go
+index 2e033bf..e27db44 100644
+--- a/gin.go
++++ b/gin.go
+@@ -172,6 +172,15 @@ type Engine struct {
+ 	// ContextWithFallback enable fallback Context.Deadline(), Context.Done(), Context.Err() and Context.Value() when Context.Request.Context() is not nil.
+ 	ContextWithFallback bool
+ 
++	// Negotiator holds the default render.Negotiator used by
++	// Context.NegotiateRender when it is called with a nil Negotiator. New()
++	// initializes it from render.DefaultOffers(); callers may replace it to
++	// register a custom set of content-negotiation offers, mapping media types
++	// to renderer factories. When this field is itself nil (for example on a
++	// zero-value Engine), NegotiateRender falls back to a negotiator built from
++	// render.DefaultOffers() so response negotiation keeps working.
++	Negotiator *render.Negotiator
++
+ 	delims           render.Delims
+ 	secureJSONPrefix string
+ 	HTMLRender       render.HTMLRender
+@@ -219,6 +228,7 @@ func New(opts ...OptionFunc) *Engine {
+ 		RemoveExtraSlash:       false,
+ 		UnescapePathValues:     true,
+ 		MaxMultipartMemory:     defaultMultipartMemory,
++		Negotiator:             render.NewNegotiator(render.DefaultOffers()...),
+ 		trees:                  make(methodTrees, 0, 9),
+ 		delims:                 render.Delims{Left: "{{", Right: "}}"},
+ 		secureJSONPrefix:       "while(1);",
+diff --git a/internal/accept/accept.go b/internal/accept/accept.go
+new file mode 100644
+index 0000000..5600eb7
+--- /dev/null
++++ b/internal/accept/accept.go
+@@ -0,0 +1,230 @@
++// Copyright 2024 Gin Core Team. All rights reserved.
++// Use of this source code is governed by a MIT style
++// license that can be found in the LICENSE file.
++
++// Package accept implements a small, shared media-type engine used to parse
++// HTTP Accept headers and negotiate a best offer from a caller-supplied list.
++//
++// Ranking follows the usual content-negotiation rules: descending quality
++// ("q=") values first, then descending media-range specificity (a fully
++// specified type beats "type/*", which beats "*/*"), and finally the caller's
++// offer order. A media range with q=0 explicitly rejects a match. Malformed
++// segments are skipped rather than causing a panic.
++package accept
++
++import (
++	"mime"
++	"sort"
++	"strconv"
++	"strings"
++)
++
++// MediaRange represents a single parsed entry of an Accept header, such as
++// "application/json;q=0.8".
++type MediaRange struct {
++	Type    string
++	Subtype string
++	Quality float64
++	Params  map[string]string
++}
++
++// ParseAccept parses an Accept header into an ordered slice of media ranges.
++// The result is sorted by descending quality, then descending specificity, and
++// finally by the order the ranges appeared in the header. Malformed segments
++// are skipped without panicking.
++func ParseAccept(header string) []MediaRange {
++	header = strings.TrimSpace(header)
++	if header == "" {
++		return nil
++	}
++
++	parts := strings.Split(header, ",")
++
++	type indexed struct {
++		mr  MediaRange
++		idx int
++	}
++	items := make([]indexed, 0, len(parts))
++
++	for i, part := range parts {
++		part = strings.TrimSpace(part)
++		if part == "" {
++			continue
++		}
++
++		mediaType, params, err := mime.ParseMediaType(part)
++		if err != nil {
++			// Go's parser rejects duplicate parameters, while deployed clients
++			// commonly send duplicate q values. Recover the media type and the
++			// last q value without accepting malformed q tokens.
++			semi := strings.IndexByte(part, ';')
++			if semi <= 0 {
++				continue
++			}
++			mediaType = strings.TrimSpace(part[:semi])
++			params = map[string]string{}
++			for _, raw := range strings.Split(part[semi+1:], ";") {
++				kv := strings.SplitN(strings.TrimSpace(raw), "=", 2)
++				if len(kv) == 2 {
++					params[strings.ToLower(strings.TrimSpace(kv[0]))] = strings.Trim(strings.TrimSpace(kv[1]), "\"")
++				}
++			}
++		}
++
++		typ, sub := splitMediaType(mediaType)
++		if typ == "" {
++			continue
++		}
++
++		quality := 1.0
++		if q, ok := params["q"]; ok {
++			qv, perr := strconv.ParseFloat(strings.TrimSpace(q), 64)
++			if perr != nil {
++				continue
++			}
++			quality = qv
++			delete(params, "q")
++		}
++		if quality < 0 {
++			quality = 0
++		}
++		if quality > 1 {
++			quality = 1
++		}
++
++		items = append(items, indexed{
++			mr: MediaRange{
++				Type:    typ,
++				Subtype: sub,
++				Quality: quality,
++				Params:  params,
++			},
++			idx: i,
++		})
++	}
++
++	sort.SliceStable(items, func(a, b int) bool {
++		if items[a].mr.Quality != items[b].mr.Quality {
++			return items[a].mr.Quality > items[b].mr.Quality
++		}
++		sa, sb := specificity(items[a].mr), specificity(items[b].mr)
++		if sa != sb {
++			return sa > sb
++		}
++		return items[a].idx < items[b].idx
++	})
++
++	ranges := make([]MediaRange, 0, len(items))
++	for _, it := range items {
++		ranges = append(ranges, it.mr)
++	}
++	return ranges
++}
++
++// Matches reports whether the given media type (e.g. "application/json") is
++// matched by the media range, honoring wildcards. A media range with q=0 never
++// matches.
++func (m MediaRange) Matches(mediaType string) bool {
++	if m.Quality <= 0 {
++		return false
++	}
++	return m.structuralMatch(mediaType)
++}
++
++// structuralMatch reports whether the media type is matched by the range's
++// type/subtype (honoring wildcards) without considering the quality value.
++func (m MediaRange) structuralMatch(mediaType string) bool {
++	mt := mediaType
++	if parsed, _, err := mime.ParseMediaType(mediaType); err == nil {
++		mt = parsed
++	}
++	typ, sub := splitMediaType(mt)
++	if typ == "" {
++		return false
++	}
++
++	if m.Type == "*" {
++		return true
++	}
++	if !strings.EqualFold(m.Type, typ) {
++		return false
++	}
++	if m.Subtype == "*" || m.Subtype == "" {
++		return true
++	}
++	return strings.EqualFold(m.Subtype, sub)
++}
++
++// Negotiate returns the best matching offer for the supplied Accept header.
++// It honors q-values and wildcards. An empty header (or "*/*") returns the
++// first offer. When the header is present but nothing is acceptable, it
++// returns the empty string.
++func Negotiate(header string, offers []string) string {
++	if len(offers) == 0 {
++		return ""
++	}
++
++	header = strings.TrimSpace(header)
++	if header == "" || header == "*/*" {
++		return offers[0]
++	}
++
++	ranges := ParseAccept(header)
++	if len(ranges) == 0 {
++		return offers[0]
++	}
++
++	bestOffer := ""
++	bestQuality := 0.0
++	bestOfferSpecificity := -1
++	for _, offer := range offers {
++		// Determine the most specific structurally-matching range for this
++		// offer; its quality (which may be 0, i.e. an explicit rejection)
++		// governs whether the offer is acceptable.
++		bestSpec := -1
++		quality := 0.0
++		matched := false
++		for i := range ranges {
++			if !ranges[i].structuralMatch(offer) {
++				continue
++			}
++			s := specificity(ranges[i])
++			if s > bestSpec || (s == bestSpec && ranges[i].Quality > quality) {
++				bestSpec = s
++				quality = ranges[i].Quality
++				matched = true
++			}
++		}
++
++		if !matched || quality <= 0 {
++			continue
++		}
++		if quality > bestQuality || (quality == bestQuality && bestSpec > bestOfferSpecificity) {
++			bestQuality = quality
++			bestOfferSpecificity = bestSpec
++			bestOffer = offer
++		}
++	}
++	return bestOffer
++}
++
++// splitMediaType splits a "type/subtype" media type into its two components.
++func splitMediaType(mediaType string) (typ, sub string) {
++	mediaType = strings.TrimSpace(mediaType)
++	if slash := strings.IndexByte(mediaType, '/'); slash > 0 && slash < len(mediaType)-1 {
++		return mediaType[:slash], mediaType[slash+1:]
++	}
++	return "", ""
++}
++
++// specificity ranks a media range: a fully specified type (2) is more specific
++// than "type/*" (1), which is more specific than "*/*" (0).
++func specificity(m MediaRange) int {
++	if m.Type == "*" {
++		return 0
++	}
++	if m.Subtype == "*" || m.Subtype == "" {
++		return 1
++	}
++	return 2
++}
+diff --git a/negotiate.go b/negotiate.go
+new file mode 100644
+index 0000000..aecd5c3
+--- /dev/null
++++ b/negotiate.go
+@@ -0,0 +1,49 @@
++// Copyright 2024 Gin Core Team. All rights reserved.
++// Use of this source code is governed by a MIT style
++// license that can be found in the LICENSE file.
++
++package gin
++
++import (
++	"errors"
++	"net/http"
++
++	"github.com/gin-gonic/gin/render"
++)
++
++// ErrNotAcceptable indicates that content negotiation could not find a
++// representation acceptable to the client's Accept header.
++var ErrNotAcceptable = errors.New("gin: no acceptable content type offered")
++
++// NegotiateRender selects a renderer for the request's Accept header using the
++// supplied Negotiator, writes the negotiated representation with the given
++// status code and returns true.
++//
++// When no offered media type is acceptable it writes an HTTP 406 Not Acceptable
++// response and returns false.
++//
++// A nil Negotiator falls back to the Engine's configured Negotiator (if any),
++// and then to a Negotiator built from render.DefaultOffers().
++func (c *Context) NegotiateRender(code int, data any, n *render.Negotiator) bool {
++	if n == nil && c.engine != nil {
++		n = c.engine.Negotiator
++	}
++	if n == nil {
++		n = render.NewNegotiator(render.DefaultOffers()...)
++	}
++
++	accept := ""
++	if c.Request != nil {
++		accept = c.Request.Header.Get("Accept")
++	}
++
++	offer, ok := n.Match(accept)
++	if !ok {
++		c.Status(http.StatusNotAcceptable)
++		c.Writer.WriteHeaderNow()
++		return false
++	}
++
++	c.Render(code, offer.Factory(data))
++	return true
++}
+diff --git a/render/negotiate.go b/render/negotiate.go
+new file mode 100644
+index 0000000..c4cb30a
+--- /dev/null
++++ b/render/negotiate.go
+@@ -0,0 +1,84 @@
++// Copyright 2024 Gin Core Team. All rights reserved.
++// Use of this source code is governed by a MIT style
++// license that can be found in the LICENSE file.
++
++package render
++
++import "github.com/gin-gonic/gin/internal/accept"
++
++// RenderFactory builds a Render for the supplied data. It is used by a
++// Negotiator to lazily construct the concrete renderer once a media type has
++// been selected via content negotiation.
++type RenderFactory func(data any) Render
++
++// Offer associates a media type (e.g. "application/json") with a RenderFactory
++// able to produce the corresponding representation.
++type Offer struct {
++	MediaType string
++	Factory   RenderFactory
++}
++
++// Negotiator maps media types to renderer factories and selects the best offer
++// for a client's Accept header using the shared internal/accept engine.
++type Negotiator struct {
++	offers []Offer
++}
++
++// NewNegotiator returns a Negotiator built from the supplied offers, preserving
++// their order (used to break ties during negotiation).
++func NewNegotiator(offers ...Offer) *Negotiator {
++	return &Negotiator{offers: offers}
++}
++
++// Offers returns the registered offers in their original order.
++func (n *Negotiator) Offers() []Offer {
++	if n == nil {
++		return nil
++	}
++	return n.offers
++}
++
++// Match selects the best offer for the given Accept header. It returns the
++// matching Offer and true when an acceptable media type is found, or a zero
++// Offer and false otherwise.
++func (n *Negotiator) Match(accept string) (Offer, bool) {
++	if n == nil || len(n.offers) == 0 {
++		return Offer{}, false
++	}
++
++	mediaTypes := make([]string, len(n.offers))
++	for i := range n.offers {
++		mediaTypes[i] = n.offers[i].MediaType
++	}
++
++	best := acceptNegotiate(accept, mediaTypes)
++	if best == "" {
++		return Offer{}, false
++	}
++	for i := range n.offers {
++		if n.offers[i].MediaType == best {
++			return n.offers[i], true
++		}
++	}
++	return Offer{}, false
++}
++
++// acceptNegotiate delegates to the shared media-type engine.
++func acceptNegotiate(header string, offers []string) string {
++	return accept.Negotiate(header, offers)
++}
++
++// DefaultOffers returns the standard set of content-negotiation offers wired to
++// Gin's built-in renderers: JSON, XML (application/xml and text/xml), YAML,
++// TOML and plain text.
++func DefaultOffers() []Offer {
++	return []Offer{
++		{MediaType: "application/json", Factory: func(data any) Render { return JSON{Data: data} }},
++		{MediaType: "application/xml", Factory: func(data any) Render { return XML{Data: data} }},
++		{MediaType: "text/xml", Factory: func(data any) Render { return XML{Data: data} }},
++		{MediaType: "application/yaml", Factory: func(data any) Render { return YAML{Data: data} }},
++		{MediaType: "application/x-yaml", Factory: func(data any) Render { return YAML{Data: data} }},
++		{MediaType: "application/toml", Factory: func(data any) Render { return TOML{Data: data} }},
++		{MediaType: "text/plain", Factory: func(data any) Render { return String{Format: "%v", Data: []any{data}} }},
++	}
++}
+diff --git a/render/render.go b/render/render.go
+index 28bc0f5..e7a01c9 100644
+--- a/render/render.go
++++ b/render/render.go
+@@ -7,6 +7,9 @@ package render
+ import "net/http"
+ 
+ // Render interface is to be implemented by JSON, XML, HTML, YAML and so on.
++//
++// A RenderFactory (see negotiate.go) builds a Render from arbitrary data once a
++// media type has been selected through content negotiation.
+ type Render interface {
+ 	// Render writes data with custom ContentType.
+ 	Render(http.ResponseWriter) error

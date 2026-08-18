@@ -7,7 +7,7 @@
 - 当前只生产题面、固定仓库环境、参考答案、隐藏测试、grader 和 QA 证据。
 - 不生成 RL rollout、模型求解轨迹或评测模型的 `model.patch`。
 - 正式成品统一进入 `output/task-NNNN/`；临时包只存在于被忽略的 `tasks/`。
-- 已有 11 条 finalized task 作为历史基线迁入 `output/`。后续编号从 `task-0012` 继续，避免覆盖。
+- 已有 12 条 finalized task 作为历史基线迁入 `output/`。后续编号从 `task-0013` 继续，避免覆盖。
 
 ## 2. 模型职责
 

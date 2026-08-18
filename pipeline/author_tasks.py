@@ -61,6 +61,7 @@ def checkout_repo(root: Path, candidate: dict) -> tuple[Path, str]:
     name = candidate["full_name"].replace("/", "__")
     repo = root / "workspaces" / "repositories" / name
     repo.parent.mkdir(parents=True, exist_ok=True)
+    preflight_commit = str((candidate.get("runtime_preflight") or {}).get("base_commit_hash") or "").strip()
     if not (repo / ".git").exists():
         subprocess.run(
             ["git", "clone", "--depth", "1", "--no-tags", candidate["clone_url"], str(repo)],
@@ -69,12 +70,55 @@ def checkout_repo(root: Path, candidate: dict) -> tuple[Path, str]:
             text=True,
             timeout=900,
         )
+    # A portable candidate snapshot carries the commit used by its offline
+    # preflight.  A fresh clone may point at a newer default-branch HEAD, so
+    # materialize and pin that exact commit before authoring.  This keeps task
+    # generation deterministic across machines.
+    if preflight_commit:
+        present = subprocess.run(
+            ["git", "cat-file", "-e", f"{preflight_commit}^{{commit}}"],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if present.returncode:
+            fetched = subprocess.run(
+                ["git", "fetch", "--no-tags", "--depth", "1", "origin", preflight_commit],
+                cwd=repo,
+                capture_output=True,
+                text=True,
+                timeout=900,
+                check=False,
+            )
+            if fetched.returncode:
+                raise RuntimeError(
+                    f"cannot materialize preflight commit {preflight_commit} for {candidate['full_name']}: "
+                    f"{(fetched.stdout + fetched.stderr)[-1000:]}"
+                )
+        checked_out = subprocess.run(
+            ["git", "checkout", "--detach", preflight_commit],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            timeout=300,
+            check=False,
+        )
+        if checked_out.returncode:
+            raise RuntimeError(
+                f"cannot checkout preflight commit {preflight_commit} for {candidate['full_name']}: "
+                f"{(checked_out.stdout + checked_out.stderr)[-1000:]}"
+            )
     # Blob-filtered clones previously caused repeated lazy fetches and corrupt
     # temporary packs. Keep the shallow checkout fully materialized and stop
     # background maintenance from racing task worktrees during production.
     git(["config", "maintenance.auto", "false"], repo)
     git(["config", "gc.auto", "0"], repo)
     commit = git(["rev-parse", "HEAD"], repo)
+    if preflight_commit and commit != preflight_commit:
+        raise RuntimeError(
+            f"repository pin mismatch for {candidate['full_name']}: expected {preflight_commit}, got {commit}"
+        )
     return repo, commit
 
 
@@ -402,7 +446,11 @@ def validate_design_against_repo(design: dict, repo: Path) -> None:
     if invalid:
         raise ValueError(f"affected_source_files contains non-source paths: {invalid}")
     existing = [path for path in files if (repo / path).is_file()]
-    required_existing = max(5, (2 * len(files) + 2) // 3)
+    # Keep the benchmark grounded in the pinned checkout. New files can make
+    # a legitimate feature task harder to validate and often indicate that
+    # the author model invented a package path, so require every declared
+    # affected source file to exist at the base commit.
+    required_existing = len(files)
     if len(existing) < required_existing:
         raise ValueError(
             f"only {len(existing)}/{len(files)} affected files exist at the base commit; "
@@ -440,8 +488,9 @@ message and return the complete final JSON in this response.
 
 Read the repository evidence below. Do not ask questions or offer scope choices; make all authoring
 decisions yourself and return the complete JSON in this response. Do not reuse a known benchmark issue and do not invent APIs that
-are absent from the repository. Choose a real user-facing feature or cross-cutting maintenance change.
-The task must require exploration, 7-9 source files, at least 3 modules/packages, and roughly 500-800
+are absent from the repository. Choose a real user-facing feature or cross-cutting maintenance change. Every affected_source_files
+path must be copied verbatim from the LANGUAGE SOURCE AND TEST FILES list above and must already exist at the pinned base commit;
+do not propose new packages, directories, or source files. The task must require exploration, 7-9 source files, at least 3 modules/packages, and roughly 500-800
 changed lines in a reference implementation. It must have non-trivial regression risk and enough public
 behavior to support 30-150 feature tests and 100-1500 property/regression tests later.
 
@@ -479,8 +528,8 @@ Preserve the feature exactly: do not change title, issue behavior, acceptance cr
 feature or regression test plans, PR-stage behavior, difficulty, or build commands. Only repair
 affected_source_files and the synchronized path/module references in pr_chain, reference_implementation_plan,
 and difficulty_card.estimated_changed_files. Keep 7-9 affected source files across at least 3 real
-modules/packages. At least 7 affected paths must be copied verbatim from REAL LANGUAGE SOURCE PATHS below.
-At most 3 affected paths may be genuinely new source files required by the preserved feature. Do not use
+modules/packages. Every affected path MUST be copied verbatim from REAL LANGUAGE SOURCE PATHS below and
+must already exist at the pinned commit. Do not create any new file or directory. Do not use
 tests, testdata, documentation, manifests, generated files, or paths outside the repository. Every
 pr_chain[].files entry must also appear in affected_source_files, every PR stage must declare files, and
 affected_source_files must equal the deduplicated union of all pr_chain[].files entries. Before returning,
@@ -527,6 +576,7 @@ def process_one(
     api_url: str,
     api_key: str,
     existing_titles: list[str],
+    reuse_response: bool = False,
 ) -> tuple[str, dict, dict]:
     slot = row["slot"]
     task_root = root / "tasks" / slot
@@ -540,21 +590,33 @@ def process_one(
                 f"repository exposes fewer than 100 statically reportable tests for {row['language']}: {capacity}"
             )
         context = repository_context(repo, row["language"])
-        result = call_opus(
-            api_url,
-            api_key,
-            author_prompt(candidate, commit, context, slot, row["language"], existing_titles),
-        )
-        results.append(result)
         response_dir = root / "workspaces" / "author-responses" / slot
         response_dir.mkdir(parents=True, exist_ok=True)
-        (response_dir / "author-response.txt").write_text(response_text(result), encoding="utf-8")
+        response_path = response_dir / "author-response.txt"
+        if reuse_response and response_path.is_file():
+            result = {
+                "status": "success",
+                "http": None,
+                "usage": {},
+                "elapsed_seconds": 0,
+                "body": {"content": [{"type": "text", "text": response_path.read_text(encoding="utf-8")}]},
+            }
+        else:
+            result = call_opus(
+                api_url,
+                api_key,
+                author_prompt(candidate, commit, context, slot, row["language"], existing_titles),
+            )
+            response_path.write_text(response_text(result), encoding="utf-8")
+        results.append(result)
         event = {
             "timestamp": now(), "slot": slot, "stage": "author_issue_pr_chain",
             "provider": provider_name(api_url), "model": MODEL, "status": result.get("status"),
             "http": result.get("http"), "usage": result_usage(results),
             "elapsed_seconds": result.get("elapsed_seconds"), "api_key_stored": False,
         }
+        if reuse_response and response_path.is_file():
+            event["response_reused"] = True
         design = parse_author_response(result, "author")
         validate_design(design)
         try:
@@ -619,6 +681,11 @@ def main() -> None:
     parser.add_argument("--slot", help="author one explicit manifest slot")
     parser.add_argument("--repository", help="use one explicit audited repository")
     parser.add_argument("--retry-failed", action="store_true")
+    parser.add_argument(
+        "--reuse-response",
+        action="store_true",
+        help="reuse an existing saved author response for the selected slot",
+    )
     args = parser.parse_args()
     env = {}
     for line in args.env_file.read_text(encoding="utf-8").splitlines():
@@ -640,10 +707,12 @@ def main() -> None:
         raise SystemExit(f"unknown repository candidate: {args.repository}")
     by_language: dict[str, list[dict]] = {language: [] for language in LANGUAGES}
     for candidate in candidates:
+        explicit_override = bool(args.repository and candidate.get("full_name") == args.repository)
+        explicit_ready = explicit_override and (candidate.get("runtime_preflight") or {}).get("status") == "passed" and int(candidate.get("test_capacity") or 0) >= 100
         if (
             candidate.get("full_name")
             and candidate.get("language") in by_language
-            and is_lightweight_candidate(candidate)
+            and (is_lightweight_candidate(candidate) or explicit_ready)
         ):
             by_language[candidate["language"]].append(candidate)
     titles_by_repository: dict[str, list[str]] = {}
@@ -703,8 +772,8 @@ def main() -> None:
             available,
             key=lambda item: (
                 assigned_by_repository.get(item["full_name"], 0),
-                int(item["size_kb"]),
-                int(item["tracked_files"]),
+                int(item.get("size_kb") or 0),
+                int(item.get("tracked_files") or 0),
                 item["full_name"],
             ),
         )
@@ -720,7 +789,16 @@ def main() -> None:
     results: list[tuple[str, dict, dict]] = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, args.workers)) as executor:
         futures = [
-            executor.submit(process_one, args.root, row, candidate, api_url, api_key, titles)
+            executor.submit(
+                process_one,
+                args.root,
+                row,
+                candidate,
+                api_url,
+                api_key,
+                titles,
+                args.reuse_response,
+            )
             for row, candidate, titles in selected
         ]
         for future in concurrent.futures.as_completed(futures):

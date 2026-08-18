@@ -11,7 +11,7 @@
     "model_apply_stderr": "",
     "test_apply_stderr": "",
     "static_validation": true,
-    "static_validation_output": "{\"task\": \"/Users/zhoujian/Desktop/实习项目/coding训练语料/deepswe/deepswe-archive-20260813/tasks/task-0011\", \"valid\": true, \"errors\": []}\n"
+    "static_validation_output": "{\"task\": \"<production-root>/tasks/task-0011\", \"valid\": true, \"errors\": []}\n"
   },
   "docker_available": true,
   "docker": {

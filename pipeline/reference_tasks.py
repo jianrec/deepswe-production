@@ -395,8 +395,21 @@ def operation_groups(repo: Path, design: dict) -> list[list[str]]:
     files = [str(path) for path in design.get("affected_source_files", [])]
     new_files = [path for path in files if not (repo / path).is_file()]
     existing_files = [path for path in files if (repo / path).is_file()]
-    groups = [[path] for path in new_files]
-    groups.extend(existing_files[index:index + 2] for index in range(0, len(existing_files), 2))
+    # A one-file create request is prone to placeholder responses from the
+    # provider. Pair each new file with one existing source file so the model
+    # must produce a concrete, integrated edit set for both targets.
+    groups: list[list[str]] = []
+    existing_index = 0
+    for new_file in new_files:
+        group = [new_file]
+        if existing_index < len(existing_files):
+            group.append(existing_files[existing_index])
+            existing_index += 1
+        groups.append(group)
+    groups.extend(
+        existing_files[index:index + 2]
+        for index in range(existing_index, len(existing_files), 2)
+    )
     groups = [group for group in groups if group]
     return groups
 
@@ -823,7 +836,10 @@ def main() -> None:
         row for row in rows
         if (not args.slot or row.get("slot") == args.slot)
         and (
-            row.get("stage") == "reference_implementation"
+            (
+                row.get("stage") == "reference_implementation"
+                and (row.get("status") != "failed" or args.retry_failed)
+            )
             or (
                 args.repair_existing
                 and args.slot

@@ -15,12 +15,13 @@
 | task-0009 | JavaScript | trekhleb/javascript-algorithms | finalized | 9 | 701 | 通过 | 通过 | 通过 |
 | task-0010 | Rust | sharkdp/fd | finalized | 8 | 830 | 通过 | 通过 | 通过 |
 | task-0011 | TypeScript | pmndrs/zustand | finalized | 10 | 827 | 通过 | 通过 | 通过 |
+| task-0012 | Go | gin-gonic/gin | finalized | 8 | 586 | 通过 | 通过 | 通过 |
 
 说明：早期 `task-0001` 的正式 Harbor 包没有随包携带新版 authoring QA 元数据，但其历史生产记录已通过完整 QA。其他十条在原生产 manifest 中均为 `finalized/finalized`，并记录 `nop_ok=true`、`oracle_ok=true`、`mutant_ok=true`。
 
 本次迁移额外执行：
 
-- 11/11 通过 `pipeline/validate_output.py` 静态 Harbor 校验；
+- 12/12 通过 `pipeline/validate_output.py` 静态 Harbor 校验；
 - 未发现 `.DS_Store`、`__pycache__` 等 transient 文件进入 `output/`；
 - 未发现常见 API key/token 模式；
 - 没有复制 Docker image、container、layer cache、仓库 cache、worktree 或模型响应日志。

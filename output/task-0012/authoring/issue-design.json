@@ -1,0 +1,178 @@
+{
+  "title": "RFC 7231 content negotiation: Accept-aware renderer registry and parameter-tolerant binding selection",
+  "task_id_slug": "rfc-7231-content-negotiation-accept-aware-re-0012",
+  "issue": "Gin can render many response formats (JSON, XML, YAML, TOML, plain text) and select a request binder from the Content-Type header, but both selection paths are naive. `binding.Default(method, contentType)` switches on the *raw* Content-Type string, so a perfectly valid request header such as `application/json; charset=utf-8` fails to match `MIMEJSON` and silently falls back to form binding. On the response side there is no principled way to pick a renderer from the client's `Accept` header: `Context.NegotiateFormat` does not honor quality (`q=`) values, does not understand media-range wildcards (`*/*`, `application/*`), and has no shared, tested notion of media-range specificity. Applications that want true content negotiation must reimplement Accept parsing by hand.\n\nThis task introduces a small, shared media-type engine and wires it through three subsystems so request and response format selection are consistent and standards-compliant.\n\nRequired behavior:\n- A new `internal/accept` package parses `Accept` headers into ordered media ranges (type, subtype, quality, params) and negotiates a best offer from a caller-supplied list. Ranking is by descending quality, then by descending specificity (a fully specified type beats `type/*`, which beats `*/*`), then by the caller's offer order. A media range with `q=0` explicitly rejects a match. Malformed segments are skipped, never panicking.\n- `binding.Default` and a new `binding.Preferred(contentType string) Binding` strip media-type parameters before matching, so `application/json; charset=utf-8` binds as JSON. All existing exact-match behavior (including `GET`→Form and unknown→Form) must be preserved.\n- A new `render.Negotiator` maps media types to renderer factories and exposes `Match(accept string) (Offer, bool)`. `render.DefaultOffers()` supplies JSON/XML/YAML/TOML/text offers.\n- `Context.NegotiateRender(code int, data any, n *render.Negotiator) bool` selects a renderer for the request's `Accept` header, writes the response, and returns true; when nothing is acceptable it writes `406 Not Acceptable` and returns false. `Context.NegotiateFormat` is upgraded to use the shared engine.\n\nCompatibility: no existing exported symbol may change signature; the `nomsgpack` build tag must keep compiling; `Context.NegotiateFormat`'s return type is unchanged. Passing a nil `Negotiator` must fall back to the engine default, then to `render.DefaultOffers()`.",
+  "acceptance_criteria": [
+    "internal/accept.ParseAccept parses quality values, wildcards, and parameters, returning media ranges sorted by (quality desc, specificity desc, input order); malformed entries are skipped without panic.",
+    "internal/accept.Negotiate(header, offers) returns the best matching offer honoring q-values and wildcards, returns \"\" when the header is present but nothing is acceptable, and returns the first offer when the header is empty or \"*/*\".",
+    "A media range with q=0 never matches its media type even when a wildcard would otherwise apply.",
+    "binding.Default and binding.Preferred match content types that carry parameters (e.g. 'application/json; charset=utf-8' -> JSON), while preserving all previous exact-match results including GET->Form and unknown->Form.",
+    "render.NewNegotiator / render.DefaultOffers build a registry whose Match returns the correct Offer for a given Accept header and false when unacceptable.",
+    "Context.NegotiateRender writes the negotiated representation with the requested status code and returns true on success.",
+    "Context.NegotiateRender writes HTTP 406 and returns false when no offered media type is acceptable, and falls back to the engine default then render.DefaultOffers() when passed a nil Negotiator.",
+    "Context.NegotiateFormat honors q-values and wildcards and returns \"\" when the Accept header excludes every offered format.",
+    "The package compiles and all targeted tests pass under both the default build and the 'nomsgpack' build tag."
+  ],
+  "public_api_contract": [
+    "package internal/accept: type MediaRange struct { Type string; Subtype string; Quality float64; Params map[string]string }",
+    "package internal/accept: func ParseAccept(header string) []MediaRange",
+    "package internal/accept: func (m MediaRange) Matches(mediaType string) bool",
+    "package internal/accept: func Negotiate(header string, offers []string) string",
+    "package binding: func Default(method, contentType string) Binding (existing symbol; now parameter-tolerant)",
+    "package binding: func Preferred(contentType string) Binding (new; returns nil for unknown types)",
+    "package render: type RenderFactory func(data any) Render",
+    "package render: type Offer struct { MediaType string; Factory RenderFactory }",
+    "package render: type Negotiator struct { /* unexported fields */ }",
+    "package render: func NewNegotiator(offers ...Offer) *Negotiator",
+    "package render: func (n *Negotiator) Offers() []Offer",
+    "package render: func (n *Negotiator) Match(accept string) (Offer, bool)",
+    "package render: func DefaultOffers() []Offer",
+    "package gin: func (c *Context) NegotiateRender(code int, data any, n *render.Negotiator) bool",
+    "package gin: func (c *Context) NegotiateFormat(offered ...string) string (existing symbol; behavior upgraded to honor q-values and wildcards)",
+    "package gin: field Engine.Negotiator *render.Negotiator (new; default negotiator used when NegotiateRender receives nil)",
+    "package gin: var ErrNotAcceptable = errors.New(\"gin: no acceptable content type offered\")"
+  ],
+  "pr_chain": [
+    {
+      "stage": "accept-engine",
+      "depends_on": [],
+      "modules": [
+        "internal/accept"
+      ],
+      "files": [
+        "internal/accept/accept.go"
+      ],
+      "behavior": "Introduce the shared media-type engine: MediaRange type, ParseAccept, MediaRange.Matches, and Negotiate. Implement quality parsing, wildcard specificity ordering, q=0 rejection, and tolerant handling of malformed segments using mime.ParseMediaType for parameter splitting."
+    },
+    {
+      "stage": "binding-content-type",
+      "depends_on": [
+        "accept-engine"
+      ],
+      "modules": [
+        "binding"
+      ],
+      "files": [
+        "binding/binding.go",
+        "binding/binding_nomsgpack.go"
+      ],
+      "behavior": "Make Default parameter-tolerant by stripping media-type parameters before the content-type switch, and add Preferred(contentType) returning the matching Binding (nil if unknown). Mirror the change across both build-tag variants so behavior is identical with and without nomsgpack."
+    },
+    {
+      "stage": "render-registry",
+      "depends_on": [
+        "accept-engine"
+      ],
+      "modules": [
+        "render"
+      ],
+      "files": [
+        "render/negotiate.go",
+        "render/render.go"
+      ],
+      "behavior": "Add RenderFactory, Offer, Negotiator (NewNegotiator/Offers/Match) and DefaultOffers built on the render.Render interface. Match uses internal/accept.Negotiate against registered media types and returns the corresponding Offer."
+    },
+    {
+      "stage": "context-negotiation",
+      "depends_on": [
+        "binding-content-type",
+        "render-registry"
+      ],
+      "modules": [
+        "gin"
+      ],
+      "files": [
+        "negotiate.go",
+        "context.go",
+        "gin.go"
+      ],
+      "behavior": "Add Context.NegotiateRender and ErrNotAcceptable in negotiate.go, upgrade Context.NegotiateFormat in context.go to use the shared engine, and add the Engine.Negotiator field plus its default wiring in gin.go. Nil-negotiator fallback resolves to Engine.Negotiator then render.DefaultOffers()."
+    }
+  ],
+  "affected_source_files": [
+    "internal/accept/accept.go",
+    "binding/binding.go",
+    "binding/binding_nomsgpack.go",
+    "render/render.go",
+    "render/negotiate.go",
+    "context.go",
+    "gin.go",
+    "negotiate.go"
+  ],
+  "module_count": 4,
+  "feature_test_plan": [
+    "ParseAccept returns media ranges in ranked order for representative headers (single type, multiple types, mixed q-values, wildcards, params).",
+    "Negotiate selects the highest-quality acceptable offer across a matrix of Accept headers and offer lists.",
+    "Negotiate returns \"\" when every offer is excluded (all matching ranges carry q=0 or none intersect the offers).",
+    "Negotiate returns the first offer for empty and '*/*' Accept headers.",
+    "MediaRange.Matches distinguishes exact, subtype-wildcard, and full-wildcard matches.",
+    "binding.Preferred maps each known MIME (with and without parameters) to the expected Binding and returns nil for unknown types.",
+    "binding.Default preserves GET->Form, unknown->Form, and each existing content-type mapping while tolerating charset parameters.",
+    "render.NewNegotiator/Match resolves JSON, XML, YAML, TOML, and text offers from realistic Accept headers.",
+    "render.DefaultOffers exposes the documented default media types and factories.",
+    "Context.NegotiateRender renders JSON/XML/YAML/TOML bodies and sets the requested status code for matching Accept headers.",
+    "Context.NegotiateRender returns 406 and false for unacceptable Accept headers and falls back correctly when passed nil.",
+    "Context.NegotiateFormat honors q-value ordering and wildcards and returns \"\" when nothing is acceptable.",
+    "End-to-end router tests exercise a handler using NegotiateRender across several Accept headers via httptest.",
+    "nomsgpack build variant negotiation tests confirm identical default offers and binding selection."
+  ],
+  "regression_test_plan": [
+    "Property test: for random Accept headers and offer sets, Negotiate never returns an offer absent from the input list.",
+    "Property test: Negotiate output is stable under offer-order-preserving shuffles of equal-quality ranges (input order tie-break holds).",
+    "Property test: adding a param (';charset=...') to any known Content-Type never changes binding.Default's selected Binding.",
+    "Property test: ParseAccept never panics and never returns a MediaRange with Quality outside [0,1] for arbitrary byte strings.",
+    "Property test: a header containing a q=0 range for type T guarantees Negotiate never returns an offer whose media type equals T.",
+    "Regression: existing binding_test, render_test, routes_test, and context_test suites continue to pass unchanged.",
+    "Regression: Context.NegotiateFormat legacy call sites returning a format for '*/*' and empty Accept keep prior results.",
+    "Regression: Engine construction (New/Default) still yields a working default Negotiator and unchanged zero-value semantics elsewhere.",
+    "Fuzz-style sweep over malformed Accept headers (extra semicolons, empty tokens, bad q values) asserts graceful skipping.",
+    "Cross-build parity: run the same negotiation and binding assertions with and without the nomsgpack tag and compare results."
+  ],
+  "difficulty_card": {
+    "difficulty_score": 3.7,
+    "exploration_points": 4,
+    "cross_module_points": 4,
+    "integration_points": 3,
+    "regression_risk_points": 4,
+    "estimated_changed_lines": 620,
+    "estimated_changed_files": 8
+  },
+  "reference_implementation_plan": [
+    "Create internal/accept/accept.go: define MediaRange; implement ParseAccept splitting the header on commas, using mime.ParseMediaType for each segment, extracting q into Quality (default 1.0, clamp to [0,1]); implement a stable sort by (Quality desc, specificity desc, index asc) where specificity ranks fully-qualified > type/* > */*; implement MediaRange.Matches(mediaType); implement Negotiate(header, offers) returning the best offer or \"\", treating empty/'*/*' headers as first-offer.",
+    "Edit binding/binding.go and binding/binding_nomsgpack.go: add a helper that strips parameters (mime.ParseMediaType, fall back to raw on error); route Default through it before the switch; add exported Preferred(contentType) that returns the matching Binding or nil. Keep both build-tag files behaviorally identical.",
+    "Add render/negotiate.go: define RenderFactory, Offer, Negotiator with unexported offers slice; implement NewNegotiator, Offers, Match (delegating to internal/accept.Negotiate over registered media types); implement DefaultOffers wiring JSON, XML (application/xml + text/xml), YAML, TOML, and text/plain factories built from existing render types.",
+    "Edit render/render.go: expose/confirm the Render interface is usable by factories and add doc references; no behavior change to existing renderers.",
+    "Add negotiate.go (package gin): implement Context.NegotiateRender(code, data, n) resolving n -> engine.Negotiator -> render.NewNegotiator(DefaultOffers()...), matching the request Accept header, writing the chosen render.Instance with the status code and returning true, or writing 406 and returning false; declare ErrNotAcceptable.",
+    "Edit context.go: reimplement NegotiateFormat to build media ranges via internal/accept and rank offered formats, returning \"\" when the Accept header excludes all offers.",
+    "Edit gin.go: add the exported Engine.Negotiator *render.Negotiator field and initialize/allow it to be nil, documenting the fallback used by NegotiateRender."
+  ],
+  "build_and_test_commands": [
+    "go build ./...",
+    "go vet ./...",
+    "go test ./... -skip '^TestSaveUploadedFileWithPermissionFailed$'",
+    "go test ./internal/accept/ ./binding/ ./render/ ./ -run 'Negotiat|Accept|Preferred|Offer'",
+    "go test -tags nomsgpack ./... -skip '^TestSaveUploadedFileWithPermissionFailed$'"
+  ],
+  "repository": {
+    "url": "https://github.com/gin-gonic/gin",
+    "full_name": "gin-gonic/gin",
+    "language": "go",
+    "base_commit": "dcaa4296d111981ffb31ac3eba90bb63e1eb5ab9",
+    "stars": 89100,
+    "license": "MIT",
+    "runtime_preflight": {
+      "command": "go test ./... -skip '^TestSaveUploadedFileWithPermissionFailed$'",
+      "environment": "linux container, root user, network disabled at test time",
+      "excluded_test_ids": [
+        "context_test.go.TestSaveUploadedFileWithPermissionFailed"
+      ],
+      "image": "deepswe-preflight-gin:34dac209ffb6",
+      "passed_at": "2026-08-10T07:35:30Z",
+      "reason": "permission-failure assertion is invalid when the evaluation container runs as root",
+      "status": "passed"
+    }
+  },
+  "slot": "task-0012",
+  "author_model": "claude-opus-4-8",
+  "pipeline_version": "2.0"
+}

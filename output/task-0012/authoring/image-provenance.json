@@ -1,0 +1,27 @@
+{
+  "build_mode": "local_pinned_checkout",
+  "build_elapsed_seconds": 14.193,
+  "verifier": {
+    "id": "sha256:01a5a059abde2845cba51948bc49cafaadf465555ff2c8eef39d0f40fa541761",
+    "repo_tags": [
+      "deepswe-task-0012-tests:dcaa4296d111"
+    ],
+    "labels": {
+      "deepswe.base_sha": "dcaa4296d111981ffb31ac3eba90bb63e1eb5ab9",
+      "deepswe.repository": "gin-gonic/gin",
+      "deepswe.source_mode": "local-pinned-checkout"
+    }
+  },
+  "environment": {
+    "id": "sha256:d9a156932487c80286f574b473a7d2a2499b7f7688de755648541705280aebac",
+    "repo_tags": [
+      "deepswe-task-0012-environment:dcaa4296d111"
+    ],
+    "labels": {
+      "deepswe.base_sha": "dcaa4296d111981ffb31ac3eba90bb63e1eb5ab9",
+      "deepswe.repository": "gin-gonic/gin",
+      "deepswe.source_mode": "local-pinned-checkout"
+    }
+  },
+  "hidden_test_isolation": true
+}
