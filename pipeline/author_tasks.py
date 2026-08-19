@@ -57,19 +57,70 @@ def git(args: list[str], cwd: Path | None = None, timeout: int = 180) -> str:
     return result.stdout.strip()
 
 
+def remove_partial_clone(repo: Path) -> None:
+    """Remove a failed clone before retrying, with an actionable error on Windows."""
+    if not repo.exists():
+        return
+    try:
+        shutil.rmtree(repo)
+    except OSError as exc:
+        raise RuntimeError(f"unable to remove partial clone {repo}: {exc}") from exc
+
+
 def checkout_repo(root: Path, candidate: dict) -> tuple[Path, str]:
     name = candidate["full_name"].replace("/", "__")
     repo = root / "workspaces" / "repositories" / name
     repo.parent.mkdir(parents=True, exist_ok=True)
     preflight_commit = str((candidate.get("runtime_preflight") or {}).get("base_commit_hash") or "").strip()
-    if not (repo / ".git").exists():
-        subprocess.run(
-            ["git", "clone", "--depth", "1", "--no-tags", candidate["clone_url"], str(repo)],
-            check=True,
+    clone_required = not (repo / ".git").exists()
+    if not clone_required:
+        existing_head = subprocess.run(
+            ["git", "cat-file", "-e", "HEAD^{commit}"],
+            cwd=repo,
             capture_output=True,
             text=True,
-            timeout=900,
+            check=False,
+            timeout=60,
         )
+        clone_required = existing_head.returncode != 0
+    if clone_required:
+        clone_errors: list[str] = []
+        for attempt in range(1, 4):
+            remove_partial_clone(repo)
+            clone = subprocess.run(
+                [
+                    "git",
+                    "-c",
+                    "http.version=HTTP/1.1",
+                    "clone",
+                    "--depth",
+                    "1",
+                    "--no-tags",
+                    "--single-branch",
+                    candidate["clone_url"],
+                    str(repo),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=900,
+            )
+            if clone.returncode == 0 and (repo / ".git").exists():
+                break
+            clone_errors.append(
+                f"attempt {attempt}: exit={clone.returncode}; "
+                f"{(clone.stderr or clone.stdout)[-1000:].strip()}"
+            )
+            if attempt < 3:
+                time.sleep(2 ** (attempt - 1))
+        else:
+            remove_partial_clone(repo)
+            raise RuntimeError(
+                f"unable to clone {candidate['full_name']} after 3 attempts: "
+                + " | ".join(clone_errors)
+            )
     # A portable candidate snapshot carries the commit used by its offline
     # preflight.  A fresh clone may point at a newer default-branch HEAD, so
     # materialize and pin that exact commit before authoring.  This keeps task
@@ -84,10 +135,12 @@ def checkout_repo(root: Path, candidate: dict) -> tuple[Path, str]:
         )
         if present.returncode:
             fetched = subprocess.run(
-                ["git", "fetch", "--no-tags", "--depth", "1", "origin", preflight_commit],
+                ["git", "-c", "http.version=HTTP/1.1", "fetch", "--no-tags", "--depth", "1", "origin", preflight_commit],
                 cwd=repo,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=900,
                 check=False,
             )
@@ -569,6 +622,19 @@ def parse_author_response(result: dict, label: str) -> dict:
         ) from exc
 
 
+def is_repository_failure(error: Exception) -> bool:
+    message = str(error).lower()
+    return any(
+        marker in message
+        for marker in (
+            "unable to clone",
+            "cannot materialize preflight commit",
+            "cannot checkout preflight commit",
+            "repository pin mismatch",
+        )
+    )
+
+
 def process_one(
     root: Path,
     row: dict,
@@ -658,7 +724,17 @@ def process_one(
         event["design_path"] = str(task_root / "authoring/issue-design.json")
         return slot, row, event
     except Exception as exc:
-        row.update({"status": "failed", "stage": "author_issue_pr_chain", "repository": candidate.get("full_name"), "errors": [repr(exc)]})
+        update = {
+            "status": "failed",
+            "stage": "author_issue_pr_chain",
+            "repository": candidate.get("full_name"),
+            "errors": [repr(exc)],
+        }
+        if is_repository_failure(exc):
+            excluded = set(str(item) for item in row.get("excluded_repositories", []))
+            excluded.add(str(candidate.get("full_name") or ""))
+            update["excluded_repositories"] = sorted(item for item in excluded if item)
+        row.update(update)
         event = {
             "timestamp": now(), "slot": slot, "stage": "author_issue_pr_chain",
             "provider": provider_name(api_url), "model": MODEL, "status": "failed",
@@ -765,7 +841,13 @@ def main() -> None:
         if not pool:
             row.update({"status": "failed", "errors": [f"no candidate repository for {row['language']}"]})
             continue
-        available = [candidate for candidate in pool if candidate["full_name"] not in repositories_in_batch]
+        excluded = {str(item) for item in row.get("excluded_repositories", [])}
+        available = [
+            candidate
+            for candidate in pool
+            if candidate["full_name"] not in repositories_in_batch
+            and candidate["full_name"] not in excluded
+        ]
         if not available:
             continue
         candidate = min(
