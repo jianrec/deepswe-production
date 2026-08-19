@@ -431,8 +431,8 @@ def validate_design(design: dict) -> None:
         raise ValueError("module count below 3")
     if float(card.get("difficulty_score", 0)) < 1.0:
         raise ValueError("difficulty score below 1.0")
-    if int(card.get("estimated_changed_lines", 0)) < 500:
-        raise ValueError("estimated changed lines below 500")
+    if int(card.get("estimated_changed_lines", 0)) < 600:
+        raise ValueError("estimated changed lines below 600")
 
 
 def validate_design_against_repo(design: dict, repo: Path) -> None:
@@ -490,7 +490,7 @@ Read the repository evidence below. Do not ask questions or offer scope choices;
 decisions yourself and return the complete JSON in this response. Do not reuse a known benchmark issue and do not invent APIs that
 are absent from the repository. Choose a real user-facing feature or cross-cutting maintenance change. Every affected_source_files
 path must be copied verbatim from the LANGUAGE SOURCE AND TEST FILES list above and must already exist at the pinned base commit;
-do not propose new packages, directories, or source files. The task must require exploration, 7-9 source files, at least 3 modules/packages, and roughly 500-800
+do not propose new packages, directories, or source files. The task must require exploration, 7-9 source files, at least 3 modules/packages, and roughly 600-900
 changed lines in a reference implementation. It must have non-trivial regression risk and enough public
 behavior to support 30-150 feature tests and 100-1500 property/regression tests later.
 

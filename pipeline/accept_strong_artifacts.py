@@ -173,8 +173,8 @@ def validate_patch_coverage(design: dict, stats: dict) -> None:
     if not 7 <= len(source_files) <= 16:
         raise ValueError(f"reference patch source file count outside 7..16: {len(source_files)}")
     changed_lines = int(stats["source_changed_lines"])
-    if not 500 <= changed_lines <= 1800:
-        raise ValueError(f"reference patch source changed lines outside 500..1800: {changed_lines}")
+    if not 600 <= changed_lines <= 1800:
+        raise ValueError(f"reference patch source changed lines outside 600..1800: {changed_lines}")
     declared = {str(item) for item in design.get("affected_source_files", []) if str(item)}
     covered = declared & source_files
     required = max(7, (3 * len(declared) + 3) // 4)

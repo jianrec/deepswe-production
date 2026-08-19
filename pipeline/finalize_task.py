@@ -258,7 +258,7 @@ def static_qa(root: Path, package: Path, row: dict) -> dict:
     }
     if not result["oracle_patch_apply"] or not result["hidden_test_patch_apply"]:
         raise ValueError("solution.patch or test.patch does not apply to the pinned base commit")
-    if stats["source_file_count"] < 7 or stats["changed_lines"] < 500:
+    if stats["source_file_count"] < 7 or stats["changed_lines"] < 600:
         raise ValueError("reference implementation is below the multi-file difficulty gate")
     design = json.loads((package / "authoring/issue-design.json").read_text(encoding="utf-8"))
     if str(design.get("pipeline_version", "")).startswith("2"):

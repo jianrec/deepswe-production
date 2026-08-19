@@ -15,7 +15,7 @@ hidden_test_provider = "packy-responses"
 [task_shape]
 min_source_files = 7
 max_source_files = 16
-min_changed_lines = 500
+min_changed_lines = 600
 max_changed_lines = 1500
 min_pr_chain_stages = 3
 max_pr_chain_stages = 5
