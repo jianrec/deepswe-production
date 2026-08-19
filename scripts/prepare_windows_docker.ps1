@@ -85,11 +85,17 @@ foreach ($feature in $features) {
     }
 }
 
-Write-Host "Installing or updating WSL..."
-& wsl.exe --install --no-distribution
-if ($LASTEXITCODE -notin @(0, 1)) { throw "wsl --install failed (exit $LASTEXITCODE)" }
+Write-Host "Updating WSL..."
 & wsl.exe --update
-if ($LASTEXITCODE -ne 0) { Write-Warning "wsl --update returned exit code $LASTEXITCODE; continuing." }
+if ($LASTEXITCODE -ne 0) {
+    Write-Warning "wsl --update returned exit code $LASTEXITCODE; retrying with a direct download."
+    & wsl.exe --update --web-download
+    if ($LASTEXITCODE -ne 0) { throw "wsl --update failed (exit $LASTEXITCODE)" }
+}
+
+Write-Host "Installing WSL components..."
+& wsl.exe --install --no-distribution --web-download
+if ($LASTEXITCODE -notin @(0, 1)) { throw "wsl --install failed (exit $LASTEXITCODE)" }
 
 if ($rebootRequired) {
     Write-Host "Windows must reboot before Docker can use WSL 2."
