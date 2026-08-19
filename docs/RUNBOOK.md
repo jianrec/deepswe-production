@@ -94,6 +94,8 @@ harbor run \
 - 初始最多两个 Docker QA 并发。
 - 不要并行运行仍使用整表写回 manifest 的旧阶段；完成单 slot merge 改造前，author/reference 阶段需要由一个调度器统一提交状态。
 
+Windows 可双击仓库根目录的 `start-production.cmd`。启动器会请求管理员权限、启用 WSL 2 组件、启动 Docker，并在 Engine 就绪后恢复 `task-0013` QA 和生产入口。若 CPU 虚拟化在 BIOS 中关闭，先开启 Intel VT-x 后再运行；启用 Windows 功能后按提示重启，再次双击启动器。
+
 ## 7. 跨电脑统一入口
 
 ```bash
