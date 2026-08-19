@@ -23,6 +23,31 @@ function Invoke-ElevatedSelf {
     exit $child.ExitCode
 }
 
+function Try-Enable-LenovoVirtualization {
+    $bios = Get-WmiObject -Namespace root\wmi -Class Lenovo_BiosSetting -ErrorAction SilentlyContinue
+    if (-not $bios) { return $false }
+    $current = @($bios | ForEach-Object { $_.CurrentSetting })
+    $entry = $current | Where-Object { $_ -match "(?i)virtualization" } | Select-Object -First 1
+    if (-not $entry) { return $false }
+    $name = ($entry -split ",", 2)[0].Trim()
+    if ($entry -match "(?i),\s*Enabled?$" ) { return $true }
+    $setter = Get-WmiObject -Namespace root\wmi -Class Lenovo_SetBiosSetting -ErrorAction SilentlyContinue
+    $saver = Get-WmiObject -Namespace root\wmi -Class Lenovo_SaveBiosSettings -ErrorAction SilentlyContinue
+    if (-not $setter -or -not $saver) { return $false }
+    # Lenovo's WMI provider generally expects Enable (some models report Enabled).
+    $setResult = $setter.SetBiosSetting("$name,Enable")
+    if ($setResult.Return -and $setResult.Return -notmatch "(?i)success|0") {
+        Write-Warning "Lenovo BIOS rejected the setting: $($setResult.Return)"
+        return $false
+    }
+    $saveResult = $saver.SaveBiosSettings()
+    if ($saveResult.Return -and $saveResult.Return -notmatch "(?i)success|0") {
+        Write-Warning "Lenovo BIOS did not save the setting: $($saveResult.Return)"
+        return $false
+    }
+    return $true
+}
+
 if (-not (Test-Administrator)) {
     Write-Host "Requesting administrator permission..."
     Invoke-ElevatedSelf
@@ -30,6 +55,13 @@ if (-not (Test-Administrator)) {
 
 $cpu = Get-CimInstance Win32_Processor
 if (-not $cpu.VirtualizationFirmwareEnabled) {
+    Write-Host "Hardware virtualization is disabled; checking Lenovo BIOS management interface..."
+    if (Try-Enable-LenovoVirtualization) {
+        Write-Host "Lenovo BIOS virtualization was enabled and is pending reboot."
+        $answer = Read-Host "Type R to reboot now, or anything else to stop"
+        if ($answer -match "^r$") { Restart-Computer }
+        exit 3
+    }
     Write-Error @"
 Intel hardware virtualization is disabled in BIOS/UEFI.
 Enable Intel Virtualization Technology (VT-x) in BIOS, reboot Windows, and run this launcher again.
