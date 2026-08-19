@@ -9,7 +9,6 @@ QA is recorded and the task remains in ``qa/in_progress``.
 from __future__ import annotations
 
 import argparse
-import fcntl
 import hashlib
 import json
 import os
@@ -20,6 +19,8 @@ import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+
+from filelock import exclusive_lock
 
 
 def now() -> str:
@@ -38,16 +39,13 @@ def atomic_jsonl(path: Path, rows: list[dict]) -> None:
 
 def merge_manifest_row(path: Path, updated: dict) -> None:
     lock_path = path.parent / ".manifest.lock"
-    lock_path.touch(exist_ok=True)
-    with lock_path.open("r+") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+    with exclusive_lock(lock_path):
         rows = load_jsonl(path)
         current = next((row for row in rows if row.get("slot") == updated.get("slot")), None)
         if current is None:
             raise ValueError(f"manifest slot disappeared: {updated.get('slot')}")
         current.update(updated)
         atomic_jsonl(path, rows)
-        fcntl.flock(lock, fcntl.LOCK_UN)
 
 
 def append_jsonl(path: Path, row: dict) -> None:
@@ -61,7 +59,17 @@ def run(
     check: bool = True,
     timeout: int = 1800,
 ) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(cmd, cwd=cwd, check=check, capture_output=True, text=True, timeout=timeout)
+    # Docker/buildkit emits UTF-8 even when Windows uses a legacy console code page.
+    return subprocess.run(
+        cmd,
+        cwd=cwd,
+        check=check,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=timeout,
+    )
 
 
 def toml_string(value: object) -> str:
@@ -260,7 +268,7 @@ def static_qa(root: Path, package: Path, row: dict) -> dict:
     }
     if not result["oracle_patch_apply"] or not result["hidden_test_patch_apply"]:
         raise ValueError("solution.patch or test.patch does not apply to the pinned base commit")
-    if stats["source_file_count"] < 7 or stats["changed_lines"] < 500:
+    if stats["source_file_count"] < 7 or stats["changed_lines"] < 600:
         raise ValueError("reference implementation is below the multi-file difficulty gate")
     design = json.loads((package / "authoring/issue-design.json").read_text(encoding="utf-8"))
     if str(design.get("pipeline_version", "")).startswith("2"):

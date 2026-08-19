@@ -1,0 +1,26 @@
+{
+  "models": {
+    "author": "claude-opus-4-8",
+    "tests": "gpt-5.6-sol"
+  },
+  "stages": {
+    "author_issue_pr_chain": {
+      "cache": 0,
+      "input": 21288,
+      "output": 5512
+    },
+    "qwen_hidden_test_calls": 2,
+    "qwen_hidden_tests": {
+      "cache": 7680,
+      "input": 40888,
+      "output": 12007
+    },
+    "reference_implementation": {
+      "cache": 0,
+      "input": 0,
+      "output": 0
+    }
+  },
+  "token_policy": "provider usage only; cache tokens are reported separately and API keys are never stored",
+  "generated_at": "2026-08-19T05:35:37.501129+00:00"
+}

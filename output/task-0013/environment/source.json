@@ -1,0 +1,7 @@
+{
+  "mode": "local-pinned-checkout",
+  "repository": "TheAlgorithms/Python",
+  "base_commit_hash": "f5988cc09713315817df6a7e327e258013a94440",
+  "cache_path": "workspaces/repositories/TheAlgorithms__Python",
+  "remote_fetch_in_dockerfile": false
+}

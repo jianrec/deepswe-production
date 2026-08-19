@@ -4,11 +4,12 @@
 from __future__ import annotations
 
 import argparse
-import fcntl
 import json
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
+
+from filelock import exclusive_lock
 
 
 def now() -> str:
@@ -58,9 +59,7 @@ def main() -> None:
 
     registry = root / "registry/repository-candidates.jsonl"
     lock_path = root / "registry/.repository-candidates.lock"
-    lock_path.touch(exist_ok=True)
-    with lock_path.open("r+") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+    with exclusive_lock(lock_path):
         rows = load_jsonl(registry)
         candidate = next((row for row in rows if row.get("full_name") == args.repository), None)
         if candidate is None:
@@ -78,7 +77,6 @@ def main() -> None:
             "passed_at": now(),
         }
         atomic_jsonl(registry, rows)
-        fcntl.flock(lock, fcntl.LOCK_UN)
     print(json.dumps({"repository": args.repository, "status": "passed", "test_count": args.test_count}, ensure_ascii=False))
 
 

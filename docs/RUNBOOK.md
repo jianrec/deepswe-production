@@ -63,6 +63,10 @@ python3 pipeline/publish_task.py \
 
 `publish_task.py` 只接受 manifest 中 `finalized/finalized` 且 QA `passed=true` 的任务。它先验证，再原子复制到 `output/`。`--cleanup-docker` 只清理该 task 的容器和两个 task-specific image，不进行全局 prune。
 
+发布完成第 15 个完整 task 时，`publish_task.py` 会在仓库根目录原子生成一次
+`AGENTS.md`。它记录当前生产契约、模型职责、QA 门槛、Windows/WSL 规则和跨电脑合并要求；
+后续发布不会覆盖该文件。若生产契约变更，应在审阅过的提交中手动更新它。
+
 Oracle 必须三次全部通过。若出现 2/3，通过次数不足仍然是 QA 失败，不能删除测试、降低门槛或标记为 finalized。应保留测试并检查失败运行；若确认是临时 API/Docker 故障，只重跑失败的 QA，不能改变 task 资产。
 
 发布后如不再需要详细运行日志，可额外使用 `--cleanup-logs`；该选项只删除指定 task 的详细日志，正式输出中的 QA 摘要仍然保留。
@@ -93,6 +97,10 @@ harbor run \
 - 单 slot 必须依次经过 author → reference → hidden tests → QA → publish。
 - 初始最多两个 Docker QA 并发。
 - 不要并行运行仍使用整表写回 manifest 的旧阶段；完成单 slot merge 改造前，author/reference 阶段需要由一个调度器统一提交状态。
+- GitHub 仓库 clone 使用 shallow、HTTP/1.1、每次 180 秒超时和最多三次重试；部分 clone 会被清理。固定
+  preflight commit 失败的仓库会写入该 slot 的 `excluded_repositories`，下次重试自动换候选仓库。
+
+Windows 可双击仓库根目录的 `start-production.cmd`。启动器会请求管理员权限、启用 WSL 2 组件、启动 Docker，并在 Engine 就绪后恢复 `task-0013` QA 和生产入口。若 CPU 虚拟化在 BIOS 中关闭，先开启 Intel VT-x 后再运行；启用 Windows 功能后按提示重启，再次双击启动器。
 
 ## 7. 跨电脑统一入口
 

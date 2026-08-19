@@ -1,0 +1,1132 @@
+diff --git a/searches/binary_search.py b/searches/binary_search.py
+index bec87b3..4406f17 100644
+--- a/searches/binary_search.py
++++ b/searches/binary_search.py
+@@ -11,7 +11,37 @@ python3 binary_search.py
+ """
+ 
+ import bisect
+-from itertools import pairwise
++from collections.abc import Callable
++from typing import Any
++
++
++def _resolve_key(key: Callable[[Any], Any] | None) -> Callable[[Any], Any]:
++    """Return a normalized key function following the shared convention.
++
++    The repository-wide ordering convention mirrors the Python built-ins
++    ``sorted``, ``min`` and ``bisect``: when ``key`` is ``None`` the element
++    itself is used for comparison, otherwise ``key`` maps each element to the
++    value used for comparison. A non-callable ``key`` raises ``TypeError`` so
++    the failure surfaces immediately instead of deep inside a comparison.
++
++    :param key: an optional callable mapping each element to its comparison value
++    :return: ``key`` when provided, otherwise an identity function
++
++    Examples:
++    >>> _resolve_key(None)(5)
++    5
++    >>> _resolve_key(len)('abc')
++    3
++    >>> _resolve_key(str.upper)('abc')
++    'ABC'
++    >>> _resolve_key(42)
++    Traceback (most recent call last):
++        ...
++    TypeError: key must be a callable or None
++    """
++    if key is not None and not callable(key):
++        raise TypeError("key must be a callable or None")
++    return key if key is not None else (lambda element: element)
+ 
+ 
+ def bisect_left(
+@@ -177,15 +207,37 @@ def insort_right(
+     sorted_collection.insert(bisect_right(sorted_collection, item, lo, hi), item)
+ 
+ 
+-def binary_search(sorted_collection: list[int], item: int) -> int:
++def binary_search(
++    sorted_collection: list[int],
++    item: int,
++    *,
++    key: Callable[[Any], Any] | None = None,
++    reverse: bool = False,
++) -> int:
+     """Pure implementation of a binary search algorithm in Python
+ 
+-    Be careful collection must be ascending sorted otherwise, the result will be
+-    unpredictable
++    Be careful: the collection must be sorted by ``key`` otherwise the result
++    will be unpredictable. By default the collection is assumed to be sorted in
++    ascending order; pass ``reverse=True`` when it is sorted in descending order
++    by ``key``.
+ 
+-    :param sorted_collection: some ascending sorted collection with comparable items
++    Ordering follows the repository-wide convention that mirrors ``bisect`` and
++    ``min``: when ``key`` is ``None`` (the default) elements are compared
++    directly, exactly as before; otherwise ``key`` maps each element to the
++    value used for comparison. The search returns the index of the first
++    element whose ``key`` equals the target's ``key``. A mismatch between
++    ``reverse`` and the real ordering yields ``-1`` rather than raising, and a
++    ``key`` producing non-monotonic values is undefined but will not crash.
++
++    :param sorted_collection: some sorted collection with comparable items
+     :param item: item value to search
+-    :return: index of the found item or -1 if the item is not found
++    :param key: optional callable mapping each element to the value used for
++        comparison. When ``None`` (the default) the element itself is compared,
++        exactly as before. A non-callable ``key`` raises ``TypeError``.
++    :param reverse: when ``True`` the input is treated as sorted in descending
++        order by ``key`` and the comparison direction is inverted.
++    :return: index of the found item or -1 if the item is not found (also -1
++        when the actual ordering does not match ``reverse``)
+ 
+     Examples:
+     >>> binary_search([0, 5, 7, 10, 15], 0)
+@@ -196,22 +248,57 @@ def binary_search(sorted_collection: list[int], item: int) -> int:
+     1
+     >>> binary_search([0, 5, 7, 10, 15], 6)
+     -1
++    >>> binary_search([15, 10, 7, 5, 0], 7, reverse=True)
++    2
++    >>> binary_search([15, 10, 7, 5, 0], 6, reverse=True)
++    -1
++    >>> binary_search([15, 10, 7, 5, 0], 15, reverse=True)
++    0
++    >>> binary_search([15, 10, 7, 5, 0], 0, reverse=True)
++    4
++    >>> binary_search([(0, 'a'), (5, 'b'), (7, 'c')], (5, 'z'), key=lambda p: p[0])
++    1
++    >>> binary_search(['a', 'bb', 'ccc'], 'zz', key=len)
++    1
++    >>> binary_search([], 5)
++    -1
++    >>> binary_search([], 5, reverse=True)
++    -1
++    >>> binary_search([7], 7)
++    0
++    >>> binary_search([7], 9)
++    -1
++    >>> binary_search([7, 7, 7], 7)
++    0
++    >>> binary_search([0, 5, 7, 10, 15], 5, key='oops')
++    Traceback (most recent call last):
++        ...
++    TypeError: key must be a callable or None
+     """
+-    if any(a > b for a, b in pairwise(sorted_collection)):
+-        raise ValueError("sorted_collection must be sorted in ascending order")
++    key_func = _resolve_key(key)
++
+     left = 0
+     right = len(sorted_collection) - 1
++    item_key = key_func(item)
++    result = -1
+ 
+     while left <= right:
+         midpoint = left + (right - left) // 2
+-        current_item = sorted_collection[midpoint]
+-        if current_item == item:
+-            return midpoint
+-        elif item < current_item:
++        current_key = key_func(sorted_collection[midpoint])
++        if current_key == item_key:
++            result = midpoint
++            right = midpoint - 1
++            continue
++        # For ascending input move left when the target sorts before the
++        # midpoint; for descending input (reverse) the direction is inverted.
++        # A mismatch between ``reverse`` and the real ordering simply fails to
++        # find the item and returns -1 rather than raising.
++        go_left = item_key > current_key if reverse else item_key < current_key
++        if go_left:
+             right = midpoint - 1
+         else:
+             left = midpoint + 1
+-    return -1
++    return result
+ 
+ 
+ def binary_search_std_lib(sorted_collection: list[int], item: int) -> int:
+diff --git a/searches/jump_search.py b/searches/jump_search.py
+index 437faf3..2f74631 100644
+--- a/searches/jump_search.py
++++ b/searches/jump_search.py
+@@ -9,7 +9,7 @@ https://en.wikipedia.org/wiki/Jump_search
+ """
+ 
+ import math
+-from collections.abc import Sequence
++from collections.abc import Callable, Sequence
+ from typing import Any, Protocol
+ 
+ 
+@@ -17,11 +17,69 @@ class Comparable(Protocol):
+     def __lt__(self, other: Any, /) -> bool: ...
+ 
+ 
+-def jump_search[T: Comparable](arr: Sequence[T], item: T) -> int:
++def _resolve_key(key: Callable[[Any], Any] | None) -> Callable[[Any], Any]:
++    """Return a normalized key function following the shared convention.
++
++    The repository-wide ordering convention mirrors the Python built-ins
++    ``sorted``, ``min`` and ``bisect``: when ``key`` is ``None`` the element
++    itself is used for comparison, otherwise ``key`` maps each element to the
++    value used for comparison. A non-callable ``key`` raises ``TypeError`` so
++    the failure surfaces immediately instead of deep inside a comparison.
++
++    :param key: an optional callable mapping each element to its comparison value
++    :return: ``key`` when provided, otherwise an identity function
++
++    Examples:
++    >>> _resolve_key(None)(5)
++    5
++    >>> _resolve_key(len)('abc')
++    3
++    >>> _resolve_key(str.upper)('abc')
++    'ABC'
++    >>> _resolve_key(42)
++    Traceback (most recent call last):
++        ...
++    TypeError: key must be a callable or None
++    """
++    if key is not None and not callable(key):
++        raise TypeError("key must be a callable or None")
++    return key if key is not None else (lambda element: element)
++
++
++def jump_search[T: Comparable](
++    arr: Sequence[T],
++    item: T,
++    *,
++    key: Callable[[Any], Any] | None = None,
++    reverse: bool = False,
++) -> int:
+     """
+     Python implementation of the jump search algorithm.
+     Return the index if the `item` is found, otherwise return -1.
+ 
++    Be careful: the collection must be sorted by ``key`` otherwise the result
++    will be unpredictable. By default the input is assumed to be sorted in
++    ascending order; pass ``reverse=True`` when it is sorted in descending
++    order by ``key``.
++
++    Ordering follows the repository-wide convention that mirrors ``bisect`` and
++    ``min``: when ``key`` is ``None`` (the default) elements are compared
++    directly, exactly as before; otherwise ``key`` maps each element to the
++    value used for comparison. The search returns the index of the first
++    element whose ``key`` equals the target's ``key``. A mismatch between
++    ``reverse`` and the real ordering yields ``-1`` rather than raising, and a
++    ``key`` producing non-monotonic values is undefined but will not crash.
++
++    :param arr: some sorted sequence with comparable items
++    :param item: item value to search
++    :param key: optional callable mapping each element to the value used for
++        comparison. When ``None`` (the default) the element itself is compared,
++        exactly as before. A non-callable ``key`` raises ``TypeError``.
++    :param reverse: when ``True`` the input is treated as sorted in descending
++        order by ``key`` and the comparison direction is inverted.
++    :return: index of the found item or -1 if the item is not found (also -1
++        when the actual ordering does not match ``reverse``)
++
+     Examples:
+     >>> jump_search([0, 1, 2, 3, 4, 5], 3)
+     3
+@@ -33,24 +91,66 @@ def jump_search[T: Comparable](arr: Sequence[T], item: T) -> int:
+     10
+     >>> jump_search(["aa", "bb", "cc", "dd", "ee", "ff"], "ee")
+     4
++    >>> jump_search([5, 4, 3, 2, 1, 0], 3, reverse=True)
++    2
++    >>> jump_search([5, 4, 3, 2, 1, 0], 8, reverse=True)
++    -1
++    >>> jump_search([15, 10, 7, 5, 0], 15, reverse=True)
++    0
++    >>> jump_search([15, 10, 7, 5, 0], 0, reverse=True)
++    4
++    >>> jump_search([15, 10, 7, 5, 0], 6, reverse=True)
++    -1
++    >>> jump_search([(0, 'a'), (5, 'b'), (7, 'c')], (5, 'z'), key=lambda p: p[0])
++    1
++    >>> jump_search(['a', 'bb', 'ccc'], 'zz', key=len)
++    1
++    >>> jump_search([], 5)
++    -1
++    >>> jump_search([], 5, reverse=True)
++    -1
++    >>> jump_search([7], 7)
++    0
++    >>> jump_search([7], 9)
++    -1
++    >>> jump_search([7, 7, 7], 7)
++    0
++    >>> jump_search([0, 1, 2, 3, 4, 5], 3, key='oops')
++    Traceback (most recent call last):
++        ...
++    TypeError: key must be a callable or None
+     """
++    key_func = _resolve_key(key)
+ 
+     arr_size = len(arr)
++    if arr_size == 0:
++        return -1
+     block_size = int(math.sqrt(arr_size))
+ 
++    item_key = key_func(item)
++
++    def before(candidate: Any, target: Any) -> bool:
++        # ``candidate`` comes before ``target`` in the (possibly reversed)
++        # ordering. For ascending input that means ``candidate < target``; for
++        # descending input (reverse) the comparison direction is inverted.
++        return candidate > target if reverse else candidate < target
++
+     prev = 0
+     step = block_size
+-    while arr[min(step, arr_size) - 1] < item:
++    # Jump ahead in blocks while the block boundary still sorts before the
++    # target under the active ordering.
++    while before(key_func(arr[min(step, arr_size) - 1]), item_key):
+         prev = step
+         step += block_size
+         if prev >= arr_size:
+             return -1
+ 
+-    while arr[prev] < item:
++    # Linear scan within the located block until we reach or pass the target.
++    while before(key_func(arr[prev]), item_key):
+         prev += 1
+         if prev == min(step, arr_size):
+             return -1
+-    if arr[prev] == item:
++    if key_func(arr[prev]) == item_key:
+         return prev
+     return -1
+ 
+diff --git a/searches/linear_search.py b/searches/linear_search.py
+index 8adb4a7..f8718b3 100644
+--- a/searches/linear_search.py
++++ b/searches/linear_search.py
+@@ -8,14 +8,61 @@ For manual testing run:
+ python3 linear_search.py
+ """
+ 
++from collections.abc import Callable
++from typing import Any
+ 
+-def linear_search(sequence: list, target: int) -> int:
++
++def _resolve_key(key: Callable[[Any], Any] | None) -> Callable[[Any], Any]:
++    """Return a normalized key function following the shared convention.
++
++    The repository-wide ordering convention mirrors the Python built-ins
++    ``sorted``, ``min`` and ``bisect``: when ``key`` is ``None`` the element
++    itself is used for comparison, otherwise ``key`` maps each element to the
++    value used for comparison. A non-callable ``key`` raises ``TypeError`` so
++    the failure surfaces immediately instead of deep inside a comparison.
++
++    :param key: an optional callable mapping each element to its comparison value
++    :return: ``key`` when provided, otherwise an identity function
++
++    Examples:
++    >>> _resolve_key(None)(5)
++    5
++    >>> _resolve_key(len)('abc')
++    3
++    >>> _resolve_key(str.upper)('abc')
++    'ABC'
++    >>> _resolve_key(42)
++    Traceback (most recent call last):
++        ...
++    TypeError: key must be a callable or None
++    """
++    if key is not None and not callable(key):
++        raise TypeError("key must be a callable or None")
++    return key if key is not None else (lambda element: element)
++
++
++def linear_search(
++    sequence: list,
++    target: Any,
++    *,
++    key: Callable[[Any], Any] | None = None,
++) -> int:
+     """A pure Python implementation of a linear search algorithm
+ 
+-    :param sequence: a collection with comparable items (sorting is not required for
+-        linear search)
++    Scans unordered data, so it takes only ``key`` (there is no ``reverse``
++    since the input need not be sorted). Ordering follows the repository-wide
++    convention: when ``key`` is ``None`` (the default) the element itself is
++    compared, exactly as before; otherwise ``key`` maps each element to the
++    value compared against ``key(target)``. The index of the first matching
++    element is returned, or ``-1`` when no element matches.
++
++    :param sequence: a collection with comparable items (sorting is not required
++        for linear search)
+     :param target: item value to search
+-    :return: index of found item or -1 if item is not found
++    :param key: optional callable mapping each element to the value used for
++        comparison. When ``None`` (the default) the element itself is compared,
++        exactly as before. A non-callable ``key`` raises ``TypeError``.
++    :return: index of first matching item or -1 if item is not found
+ 
+     Examples:
+     >>> linear_search([0, 5, 7, 10, 15], 0)
+@@ -26,9 +73,26 @@ def linear_search(sequence: list, target: int) -> int:
+     1
+     >>> linear_search([0, 5, 7, 10, 15], 6)
+     -1
++    >>> linear_search([(0, 'a'), (5, 'b')], (5, 'z'), key=lambda p: p[0])
++    1
++    >>> linear_search(['a', 'bb', 'ccc'], 'zz', key=len)
++    1
++    >>> linear_search([], 5)
++    -1
++    >>> linear_search([7], 7)
++    0
++    >>> linear_search([7, 7, 7], 7)
++    0
++    >>> linear_search([0, 5, 7, 10, 15], 5, key='oops')
++    Traceback (most recent call last):
++        ...
++    TypeError: key must be a callable or None
+     """
+-    for index, item in enumerate(sequence):
+-        if item == target:
++    key_func = _resolve_key(key)
++
++    target_key = key_func(target)
++    for index, element in enumerate(sequence):
++        if key_func(element) == target_key:
+             return index
+     return -1
+ 
+diff --git a/sorts/bubble_sort.py b/sorts/bubble_sort.py
+index c66d5d5..57d14ef 100644
+--- a/sorts/bubble_sort.py
++++ b/sorts/bubble_sort.py
+@@ -1,7 +1,42 @@
++from collections.abc import Callable
+ from typing import Any
+ 
+ 
+-def bubble_sort_iterative(collection: list[Any]) -> list[Any]:
++def _resolve_key(key: Callable[[Any], Any] | None) -> Callable[[Any], Any]:
++    """Return a normalized key function following the shared convention.
++
++    The repository-wide ordering convention mirrors the Python built-ins
++    ``sorted``, ``min`` and ``bisect``: when ``key`` is ``None`` the element
++    itself is used for comparison, otherwise ``key`` maps each element to the
++    value used for comparison. A non-callable ``key`` raises ``TypeError`` so
++    the failure surfaces immediately instead of deep inside a comparison.
++
++    :param key: an optional callable mapping each element to its comparison value
++    :return: ``key`` when provided, otherwise an identity function
++
++    Examples:
++    >>> _resolve_key(None)(5)
++    5
++    >>> _resolve_key(len)('abc')
++    3
++    >>> _resolve_key(str.upper)('abc')
++    'ABC'
++    >>> _resolve_key(42)
++    Traceback (most recent call last):
++        ...
++    TypeError: key must be a callable or None
++    """
++    if key is not None and not callable(key):
++        raise TypeError("key must be a callable or None")
++    return key if key is not None else (lambda element: element)
++
++
++def bubble_sort_iterative(
++    collection: list[Any],
++    *,
++    key: Callable[[Any], Any] | None = None,
++    reverse: bool = False,
++) -> list[Any]:
+     """Pure implementation of the bubble sort algorithm in Python (iterative).
+ 
+     Bubble sort works by repeatedly stepping through the collection,
+@@ -17,7 +52,15 @@ def bubble_sort_iterative(collection: list[Any]) -> list[Any]:
+ 
+     :param collection: some mutable ordered collection with heterogeneous
+     comparable items inside
+-    :return: the same collection ordered in ascending order
++    :param key: optional callable mapping each element to the value used for
++    comparison. When ``None`` (the default) the element itself is compared,
++    exactly as before, mirroring ``sorted``/``min``. A non-callable ``key``
++    raises ``TypeError``.
++    :param reverse: when ``True`` the result is ordered descending. The sort is
++    stable in both directions, so elements comparing equal under ``key`` keep
++    their original relative order, matching ``sorted(..., reverse=True)``.
++    :return: the same collection ordered in ascending order (descending when
++    ``reverse=True``)
+ 
+     Examples:
+     >>> bubble_sort_iterative([0, 5, 2, 3, 2])
+@@ -34,6 +77,25 @@ def bubble_sort_iterative(collection: list[Any]) -> list[Any]:
+     [3, 3, 3, 3]
+     >>> bubble_sort_iterative([56])
+     [56]
++    >>> bubble_sort_iterative([0, 5, 3, 2, 2], reverse=True)
++    [5, 3, 2, 2, 0]
++    >>> bubble_sort_iterative([], reverse=True)
++    []
++    >>> bubble_sort_iterative([7, 7, 7], reverse=True)
++    [7, 7, 7]
++    >>> bubble_sort_iterative(['bb', 'a', 'ccc'], key=len)
++    ['a', 'bb', 'ccc']
++    >>> bubble_sort_iterative(['bb', 'a', 'ccc'], key=len, reverse=True)
++    ['ccc', 'bb', 'a']
++    >>> bubble_sort_iterative([(1, 'a'), (1, 'b'), (0, 'c')], key=lambda p: p[0])
++    [(0, 'c'), (1, 'a'), (1, 'b')]
++    >>> bubble_sort_iterative(
++    ...     [(1, 'a'), (1, 'b'), (0, 'c')], key=lambda p: p[0], reverse=True
++    ... )
++    [(1, 'a'), (1, 'b'), (0, 'c')]
++    >>> original = [3, 1, 2]
++    >>> bubble_sort_iterative(original) is original
++    True
+     >>> bubble_sort_iterative([0, 5, 2, 3, 2]) == sorted([0, 5, 2, 3, 2])
+     True
+     >>> bubble_sort_iterative([]) == sorted([])
+@@ -59,11 +121,18 @@ def bubble_sort_iterative(collection: list[Any]) -> list[Any]:
+     >>> bubble_sort_iterative(collection_arg) == sorted(collection_arg)
+     True
+     """
++    key_func = _resolve_key(key)
++
+     length = len(collection)
+     for i in reversed(range(length)):
+         swapped = False
+         for j in range(i):
+-            if collection[j] > collection[j + 1]:
++            left_key = key_func(collection[j])
++            right_key = key_func(collection[j + 1])
++            # Swap only on a strict out-of-order relation so equal-key elements
++            # keep their original order (stability). The relation is inverted
++            # for descending (reverse) ordering, matching sorted(..., reverse).
++            if left_key < right_key if reverse else left_key > right_key:
+                 swapped = True
+                 collection[j], collection[j + 1] = collection[j + 1], collection[j]
+         if not swapped:
+@@ -71,7 +140,12 @@ def bubble_sort_iterative(collection: list[Any]) -> list[Any]:
+     return collection
+ 
+ 
+-def bubble_sort_recursive(collection: list[Any]) -> list[Any]:
++def bubble_sort_recursive(
++    collection: list[Any],
++    *,
++    key: Callable[[Any], Any] | None = None,
++    reverse: bool = False,
++) -> list[Any]:
+     """Pure implementation of the bubble sort algorithm in Python (recursive).
+ 
+     Functionally identical to the iterative version: each call makes a
+@@ -87,7 +161,13 @@ def bubble_sort_recursive(collection: list[Any]) -> list[Any]:
+     though the recursion adds O(n) call-stack frames in the worst case.
+ 
+     :param collection: mutable ordered sequence of elements
+-    :return: the same list in ascending order
++    :param key: optional callable mapping each element to the value used for
++    comparison. When ``None`` (the default) the element itself is compared,
++    exactly as before, mirroring ``sorted``/``min``. A non-callable ``key``
++    raises ``TypeError``.
++    :param reverse: when ``True`` the result is ordered descending. The sort is
++    stable in both directions, matching ``sorted(..., reverse=True)``.
++    :return: the same list in ascending order (descending when ``reverse=True``)
+ 
+     Examples:
+     >>> bubble_sort_recursive([0, 5, 2, 3, 2])
+@@ -116,6 +196,18 @@ def bubble_sort_recursive(collection: list[Any]) -> list[Any]:
+     [1, 2, 3.3, 4.4, 5, 6, 7.7]
+     >>> bubble_sort_recursive(['a', 'Z', 'B', 'C', 'A', 'c'])
+     ['A', 'B', 'C', 'Z', 'a', 'c']
++    >>> bubble_sort_recursive([0, 5, 3, 2, 2], reverse=True)
++    [5, 3, 2, 2, 0]
++    >>> bubble_sort_recursive([], reverse=True)
++    []
++    >>> bubble_sort_recursive([7, 7, 7], reverse=True)
++    [7, 7, 7]
++    >>> bubble_sort_recursive(['bb', 'a', 'ccc'], key=len)
++    ['a', 'bb', 'ccc']
++    >>> bubble_sort_recursive(['bb', 'a', 'ccc'], key=len, reverse=True)
++    ['ccc', 'bb', 'a']
++    >>> bubble_sort_recursive([(1, 'a'), (1, 'b'), (0, 'c')], key=lambda p: p[0])
++    [(0, 'c'), (1, 'a'), (1, 'b')]
+     >>> import random
+     >>> collection_arg = random.sample(range(-50, 50), 100)
+     >>> bubble_sort_recursive(collection_arg) == sorted(collection_arg)
+@@ -125,14 +217,36 @@ def bubble_sort_recursive(collection: list[Any]) -> list[Any]:
+     >>> bubble_sort_recursive(collection_arg) == sorted(collection_arg)
+     True
+     """
++    key_func = _resolve_key(key)
++
+     length = len(collection)
+     swapped = False
+     for i in range(length - 1):
+-        if collection[i] > collection[i + 1]:
++        left_key = key_func(collection[i])
++        right_key = key_func(collection[i + 1])
++        # Swap only on a strict out-of-order relation to preserve stability,
++        # inverting the relation for descending (reverse) ordering.
++        if left_key < right_key if reverse else left_key > right_key:
+             collection[i], collection[i + 1] = collection[i + 1], collection[i]
+             swapped = True
+ 
+-    return collection if not swapped else bubble_sort_recursive(collection)
++    return (
++        collection
++        if not swapped
++        else bubble_sort_recursive(collection, key=key, reverse=reverse)
++    )
++
++
++# Public convention entry point mirroring ``sorted``: operate on a shallow copy
++# so callers can retain their input order while the legacy iterative/recursive
++# functions keep their established in-place behavior.
++def bubble_sort(
++    collection: list[Any],
++    *,
++    key: Callable[[Any], Any] | None = None,
++    reverse: bool = False,
++) -> list[Any]:
++    return bubble_sort_iterative(collection.copy(), key=key, reverse=reverse)
+ 
+ 
+ if __name__ == "__main__":
+diff --git a/sorts/insertion_sort.py b/sorts/insertion_sort.py
+index 2e39be2..2c70e9c 100644
+--- a/sorts/insertion_sort.py
++++ b/sorts/insertion_sort.py
+@@ -13,7 +13,7 @@ For manual testing run:
+ python3 insertion_sort.py
+ """
+ 
+-from collections.abc import MutableSequence
++from collections.abc import Callable, MutableSequence
+ from typing import Any, Protocol, TypeVar
+ 
+ 
+@@ -24,12 +24,56 @@ class Comparable(Protocol):
+ T = TypeVar("T", bound=Comparable)
+ 
+ 
+-def insertion_sort[T: Comparable](collection: MutableSequence[T]) -> MutableSequence[T]:
++def _resolve_key(key: Callable[[Any], Any] | None) -> Callable[[Any], Any]:
++    """Return a normalized key function following the shared convention.
++
++    Mirrors the Python built-ins ``sorted``/``min``: when ``key`` is ``None``
++    the element itself is compared, otherwise ``key`` maps each element to the
++    value used for comparison. A non-callable ``key`` raises ``TypeError``.
++
++    :param key: an optional callable mapping each element to its comparison value
++    :return: ``key`` when provided, otherwise an identity function
++
++    Examples:
++    >>> _resolve_key(None)(5)
++    5
++    >>> _resolve_key(len)('abc')
++    3
++    >>> _resolve_key('nope')
++    Traceback (most recent call last):
++        ...
++    TypeError: key must be a callable or None
++    """
++    if key is not None and not callable(key):
++        raise TypeError("key must be a callable or None")
++    return key if key is not None else (lambda element: element)
++
++
++def insertion_sort[T: Comparable](
++    collection: MutableSequence[T],
++    *,
++    key: Callable[[Any], Any] | None = None,
++    reverse: bool = False,
++) -> MutableSequence[T]:
+     """A pure Python implementation of the insertion sort algorithm
+ 
++    Ordering follows the repository-wide convention that mirrors ``sorted``.
++    When ``key`` is ``None`` (the default) elements are compared directly,
++    exactly as before; otherwise ``key`` maps each element to the value used
++    for comparison. When ``reverse`` is ``True`` the result is ordered
++    descending. The sort is stable in both directions: elements comparing
++    equal under ``key`` keep their original relative order, matching
++    ``sorted(..., reverse=True)``.
++
+     :param collection: some mutable ordered collection with heterogeneous
+     comparable items inside
+-    :return: the same collection ordered by ascending
++    :param key: optional callable mapping each element to the value used for
++    comparison. When ``None`` (the default) the element itself is compared,
++    exactly as before. A non-callable ``key`` raises ``TypeError``.
++    :param reverse: when ``True`` the result is ordered descending. The sort is
++    stable in both directions, matching ``sorted(..., reverse=True)``.
++    :return: the same collection ordered by ascending (descending when
++    ``reverse=True``)
+ 
+     Examples:
+     >>> insertion_sort([0, 5, 3, 2, 2])
+@@ -40,6 +84,26 @@ def insertion_sort[T: Comparable](collection: MutableSequence[T]) -> MutableSequ
+     True
+     >>> insertion_sort(['d', 'a', 'b', 'e', 'c']) == sorted(['d', 'a', 'b', 'e', 'c'])
+     True
++    >>> insertion_sort([0, 5, 3, 2, 2], reverse=True)
++    [5, 3, 2, 2, 0]
++    >>> insertion_sort([], reverse=True)
++    []
++    >>> insertion_sort([42])
++    [42]
++    >>> insertion_sort([7, 7, 7], reverse=True)
++    [7, 7, 7]
++    >>> insertion_sort(['bb', 'a', 'ccc'], key=len)
++    ['a', 'bb', 'ccc']
++    >>> insertion_sort(['bb', 'a', 'ccc'], key=len, reverse=True)
++    ['ccc', 'bb', 'a']
++    >>> insertion_sort([(1, 'a'), (1, 'b'), (0, 'c')], key=lambda p: p[0])
++    [(0, 'c'), (1, 'a'), (1, 'b')]
++    >>> insertion_sort([(1, 'a'), (1, 'b'), (0, 'c')], key=lambda p: p[0], reverse=True)
++    [(1, 'a'), (1, 'b'), (0, 'c')]
++    >>> insertion_sort([3, 1, 2], key='oops')
++    Traceback (most recent call last):
++        ...
++    TypeError: key must be a callable or None
+     >>> import random
+     >>> collection = random.sample(range(-50, 50), 100)
+     >>> insertion_sort(collection) == sorted(collection)
+@@ -50,9 +114,20 @@ def insertion_sort[T: Comparable](collection: MutableSequence[T]) -> MutableSequ
+     True
+     """
+ 
++    key_func = _resolve_key(key)
++
+     for insert_index in range(1, len(collection)):
+         insert_value = collection[insert_index]
+-        while insert_index > 0 and insert_value < collection[insert_index - 1]:
++        insert_key = key_func(insert_value)
++        # Shift on a strict comparison only, so equal-key elements retain their
++        # original relative order (stability) in both directions. For ascending
++        # order we shift while the new value sorts before its predecessor; for
++        # descending (reverse) order the comparison direction is inverted.
++        while insert_index > 0 and (
++            key_func(collection[insert_index - 1]) < insert_key
++            if reverse
++            else insert_key < key_func(collection[insert_index - 1])
++        ):
+             collection[insert_index] = collection[insert_index - 1]
+             insert_index -= 1
+         collection[insert_index] = insert_value
+diff --git a/sorts/merge_sort.py b/sorts/merge_sort.py
+index 11c2027..cd6ddd5 100644
+--- a/sorts/merge_sort.py
++++ b/sorts/merge_sort.py
+@@ -10,12 +10,66 @@ python merge_sort.py
+ """
+ 
+ 
+-def merge_sort(collection: list) -> list:
++from collections.abc import Callable
++from typing import Any
++
++
++def _resolve_key(key: Callable[[Any], Any] | None) -> Callable[[Any], Any]:
++    """Return a normalized key function following the shared convention.
++
++    The repository-wide ordering convention mirrors the Python built-ins
++    ``sorted``, ``min`` and ``bisect``: when ``key`` is ``None`` the element
++    itself is used for comparison, otherwise ``key`` maps each element to the
++    value used for comparison. A non-callable ``key`` raises ``TypeError`` so
++    the failure surfaces immediately instead of deep inside a comparison.
++
++    :param key: an optional callable mapping each element to its comparison value
++    :return: ``key`` when provided, otherwise an identity function
++
++    Examples:
++    >>> _resolve_key(None)(5)
++    5
++    >>> _resolve_key(len)('abc')
++    3
++    >>> _resolve_key(str.upper)('abc')
++    'ABC'
++    >>> _resolve_key(42)
++    Traceback (most recent call last):
++        ...
++    TypeError: key must be a callable or None
++    """
++    if key is not None and not callable(key):
++        raise TypeError("key must be a callable or None")
++    return key if key is not None else (lambda element: element)
++
++
++def merge_sort(
++    collection: list,
++    *,
++    key: Callable[[Any], Any] | None = None,
++    reverse: bool = False,
++) -> list:
+     """
+     Sorts a list using the merge sort algorithm.
+ 
++    Ordering follows the repository-wide convention that mirrors ``sorted``.
++    When ``key`` is ``None`` (the default) elements are compared directly,
++    exactly as before; otherwise ``key`` maps each element to the value used
++    for comparison. When ``reverse`` is ``True`` the result is ordered
++    descending. The sort is stable in both directions: elements comparing
++    equal under ``key`` keep their original relative order, matching
++    ``sorted(..., reverse=True)``.
++
+     :param collection: A mutable ordered collection with comparable items.
+-    :return: The same collection ordered in ascending order.
++    :param key: Optional callable mapping each element to the value used for
++        comparison. When ``None`` (the default) the element itself is compared,
++        mirroring ``sorted``/``min``. A non-callable ``key`` raises
++        ``TypeError``.
++    :param reverse: When ``True`` the result is ordered descending. The sort is
++        stable in both directions: elements comparing equal under ``key`` keep
++        their original relative order, matching ``sorted(..., reverse=True)``.
++    :return: The same collection ordered in ascending order (or descending when
++        ``reverse=True``).
+ 
+     Time Complexity: O(n log n)
+     Space Complexity: O(n)
+@@ -27,19 +81,63 @@ def merge_sort(collection: list) -> list:
+     []
+     >>> merge_sort([-2, -5, -45])
+     [-45, -5, -2]
++    >>> merge_sort([0, 5, 3, 2, 2], reverse=True)
++    [5, 3, 2, 2, 0]
++    >>> merge_sort([], reverse=True)
++    []
++    >>> merge_sort([42])
++    [42]
++    >>> merge_sort([7, 7, 7], reverse=True)
++    [7, 7, 7]
++    >>> merge_sort(['bb', 'a', 'ccc'], key=len)
++    ['a', 'bb', 'ccc']
++    >>> merge_sort(['bb', 'a', 'ccc'], key=len, reverse=True)
++    ['ccc', 'bb', 'a']
++    >>> merge_sort([(1, 'a'), (1, 'b'), (0, 'c')], key=lambda p: p[0])
++    [(0, 'c'), (1, 'a'), (1, 'b')]
++    >>> merge_sort([(1, 'a'), (1, 'b'), (0, 'c')], key=lambda p: p[0], reverse=True)
++    [(1, 'a'), (1, 'b'), (0, 'c')]
++    >>> merge_sort([3, 1, 2], key='oops')
++    Traceback (most recent call last):
++        ...
++    TypeError: key must be a callable or None
++    >>> import random
++    >>> collection_arg = random.sample(range(-50, 50), 100)
++    >>> merge_sort(collection_arg) == sorted(collection_arg)
++    True
++    >>> merge_sort(collection_arg[:], reverse=True) == sorted(
++    ...     collection_arg, reverse=True
++    ... )
++    True
++    >>> import string
++    >>> collection_arg = random.choices(string.ascii_letters + string.digits, k=100)
++    >>> merge_sort(collection_arg) == sorted(collection_arg)
++    True
+     """
++    key_func = _resolve_key(key)
+ 
+     def merge(left: list, right: list) -> list:
+         """
+         Merge two sorted lists into a single sorted list.
+ 
++        Elements are compared through the enclosing ``key_func``. On ties the
++        left element is taken first so equal-key elements keep their original
++        relative order (stability); the take condition is inverted for
++        descending (``reverse``) ordering so stability is preserved in both
++        directions, matching ``sorted(..., reverse=True)``.
++
+         :param left: Left collection
+         :param right: Right collection
+         :return: Merged result
+         """
+         result = []
+         while left and right:
+-            result.append(left.pop(0) if left[0] <= right[0] else right.pop(0))
++            left_key = key_func(left[0])
++            right_key = key_func(right[0])
++            # Take from the left on ties to preserve stability. Invert the take
++            # condition for descending (reverse) ordering.
++            take_left = left_key >= right_key if reverse else left_key <= right_key
++            result.append(left.pop(0) if take_left else right.pop(0))
+         result.extend(left)
+         result.extend(right)
+         return result
+@@ -47,7 +145,10 @@ def merge_sort(collection: list) -> list:
+     if len(collection) <= 1:
+         return collection
+     mid_index = len(collection) // 2
+-    return merge(merge_sort(collection[:mid_index]), merge_sort(collection[mid_index:]))
++    return merge(
++        merge_sort(collection[:mid_index], key=key, reverse=reverse),
++        merge_sort(collection[mid_index:], key=key, reverse=reverse),
++    )
+ 
+ 
+ if __name__ == "__main__":
+diff --git a/sorts/selection_sort.py b/sorts/selection_sort.py
+index 506836b..57ffd49 100644
+--- a/sorts/selection_sort.py
++++ b/sorts/selection_sort.py
+@@ -1,8 +1,61 @@
+-def selection_sort(collection: list[int]) -> list[int]:
++from collections.abc import Callable
++from typing import Any
++
++
++def _resolve_key(key: Callable[[Any], Any] | None) -> Callable[[Any], Any]:
++    """Return a normalized key function following the shared convention.
++
++    The repository-wide ordering convention mirrors the Python built-ins
++    ``sorted``, ``min`` and ``bisect``: when ``key`` is ``None`` the element
++    itself is used for comparison, otherwise ``key`` maps each element to the
++    value used for comparison. A non-callable ``key`` raises ``TypeError`` so
++    the failure surfaces immediately instead of deep inside a comparison.
++
++    :param key: an optional callable mapping each element to its comparison value
++    :return: ``key`` when provided, otherwise an identity function
++
++    Examples:
++    >>> _resolve_key(None)(5)
++    5
++    >>> _resolve_key(len)('abc')
++    3
++    >>> _resolve_key(str.upper)('abc')
++    'ABC'
++    >>> _resolve_key(42)
++    Traceback (most recent call last):
++        ...
++    TypeError: key must be a callable or None
++    """
++    if key is not None and not callable(key):
++        raise TypeError("key must be a callable or None")
++    return key if key is not None else (lambda element: element)
++
++
++def selection_sort(
++    collection: list[int],
++    *,
++    key: Callable[[Any], Any] | None = None,
++    reverse: bool = False,
++) -> list[int]:
+     """
+     Sorts a list in ascending order using the selection sort algorithm.
+ 
++    Ordering follows the repository-wide convention that mirrors ``sorted``.
++    When ``key`` is ``None`` (the default) elements are compared directly,
++    exactly as before; otherwise ``key`` maps each element to the value used
++    for comparison. When ``reverse`` is ``True`` the result is ordered
++    descending. The sort is stable in both directions: elements comparing
++    equal under ``key`` keep their original relative order, matching
++    ``sorted(..., reverse=True)``.
++
+     :param collection: A list of integers to be sorted.
++    :param key: Optional callable mapping each element to the value used for
++        comparison. When ``None`` (the default) the element itself is compared,
++        mirroring ``sorted``/``min``. A non-callable ``key`` raises
++        ``TypeError``.
++    :param reverse: When ``True`` the result is ordered descending. The sort is
++        stable in both directions: elements comparing equal under ``key`` keep
++        their original relative order, matching ``sorted(..., reverse=True)``.
+     :return: The sorted list.
+ 
+     Examples:
+@@ -14,16 +67,60 @@ def selection_sort(collection: list[int]) -> list[int]:
+ 
+     >>> selection_sort([-2, -5, -45])
+     [-45, -5, -2]
++
++    >>> selection_sort([0, 5, 3, 2, 2], reverse=True)
++    [5, 3, 2, 2, 0]
++    >>> selection_sort([], reverse=True)
++    []
++    >>> selection_sort([42])
++    [42]
++    >>> selection_sort([7, 7, 7], reverse=True)
++    [7, 7, 7]
++    >>> selection_sort(['bb', 'a', 'ccc'], key=len)
++    ['a', 'bb', 'ccc']
++    >>> selection_sort(['bb', 'a', 'ccc'], key=len, reverse=True)
++    ['ccc', 'bb', 'a']
++    >>> selection_sort([(1, 'a'), (1, 'b'), (0, 'c')], key=lambda p: p[0])
++    [(0, 'c'), (1, 'a'), (1, 'b')]
++    >>> selection_sort([(1, 'a'), (1, 'b'), (0, 'c')], key=lambda p: p[0], reverse=True)
++    [(1, 'a'), (1, 'b'), (0, 'c')]
++    >>> selection_sort([3, 1, 2], key='oops')
++    Traceback (most recent call last):
++        ...
++    TypeError: key must be a callable or None
++    >>> import random
++    >>> collection_arg = random.sample(range(-50, 50), 100)
++    >>> selection_sort(collection_arg) == sorted(collection_arg)
++    True
++    >>> selection_sort(collection_arg[:], reverse=True) == sorted(
++    ...     collection_arg, reverse=True
++    ... )
++    True
+     """
++    key_func = _resolve_key(key)
+ 
+     length = len(collection)
+     for i in range(length - 1):
+-        min_index = i
++        # Select the element with the smallest (or largest, when reverse) key
++        # in the remaining unsorted portion. A strict comparison keeps the
++        # first-seen element among equal keys, and inserting it via a rotation
++        # (pop + insert) rather than a swap preserves the relative order of
++        # equal elements, making the sort stable in both directions.
++        selected_index = i
++        selected_key = key_func(collection[i])
+         for k in range(i + 1, length):
+-            if collection[k] < collection[min_index]:
+-                min_index = k
+-        if min_index != i:
+-            collection[i], collection[min_index] = collection[min_index], collection[i]
++            candidate_key = key_func(collection[k])
++            better = (
++                candidate_key > selected_key
++                if reverse
++                else candidate_key < selected_key
++            )
++            if better:
++                selected_index = k
++                selected_key = candidate_key
++        if selected_index != i:
++            selected_value = collection.pop(selected_index)
++            collection.insert(i, selected_value)
+     return collection
+ 
+ 
+diff --git a/strings/top_k_frequent_words.py b/strings/top_k_frequent_words.py
+index 40fa7fc..3a453ac 100644
+--- a/strings/top_k_frequent_words.py
++++ b/strings/top_k_frequent_words.py
+@@ -14,11 +14,40 @@ def top_k_frequent_words(words, k_value):
+ """
+ 
+ from collections import Counter
++from collections.abc import Callable
+ from functools import total_ordering
++from typing import Any
+ 
+ from data_structures.heap.heap import Heap
+ 
+ 
++def _resolve_key(key: Callable[[str], Any] | None) -> Callable[[str], Any]:
++    """Return a normalized key function following the shared convention.
++
++    The repository-wide ordering convention mirrors the Python built-ins
++    ``sorted``, ``min`` and ``bisect``: when ``key`` is ``None`` the word
++    itself is used for the tie-break, otherwise ``key`` maps each word to the
++    value used for comparison. A non-callable ``key`` raises ``TypeError`` so
++    the failure surfaces immediately instead of deep inside a comparison.
++
++    :param key: an optional callable mapping each word to its comparison value
++    :return: ``key`` when provided, otherwise an identity function
++
++    Examples:
++    >>> _resolve_key(None)('abc')
++    'abc'
++    >>> _resolve_key(len)('abc')
++    3
++    >>> _resolve_key(42)
++    Traceback (most recent call last):
++        ...
++    TypeError: key must be a callable or None
++    """
++    if key is not None and not callable(key):
++        raise TypeError("key must be a callable or None")
++    return key if key is not None else (lambda word: word)
++
++
+ @total_ordering
+ class WordCount:
+     def __init__(self, word: str, count: int) -> None:
+@@ -64,7 +93,13 @@ class WordCount:
+         return self.count < other.count
+ 
+ 
+-def top_k_frequent_words(words: list[str], k_value: int) -> list[str]:
++def top_k_frequent_words(
++    words: list[str],
++    k_value: int,
++    *,
++    key: Callable[[str], Any] | None = None,
++    reverse: bool = False,
++) -> list[str]:
+     """
+     Returns the `k_value` most frequently occurring words,
+     in non-increasing order of occurrence.
+@@ -73,6 +108,22 @@ def top_k_frequent_words(words: list[str], k_value: int) -> list[str]:
+     In case `k_value` is greater than the number of distinct words, a value of k equal
+     to the number of distinct words will be considered, instead.
+ 
++    Ranking follows the repository-wide ordering convention: results are ordered
++    by descending frequency, and ``key`` customizes the tie-break among
++    equal-frequency words. When ``key`` is ``None`` (the default) the tie-break
++    is lexicographic ascending, exactly as before; otherwise ``key`` maps each
++    word to the value used for the equal-frequency comparison. ``reverse=True``
++    flips the final ordered list. A non-callable ``key`` raises ``TypeError``.
++
++    :param words: list of words to rank
++    :param k_value: number of top words to return
++    :param key: optional callable mapping each word to the value used for the
++        equal-frequency tie-break. When ``None`` (the default) the word itself
++        is used, giving a lexicographic-ascending tie-break. A non-callable
++        ``key`` raises ``TypeError``.
++    :param reverse: when ``True`` the final ordered list is reversed.
++    :return: the ranked list of at most ``k_value`` words
++
+     >>> top_k_frequent_words(['a', 'b', 'c', 'a', 'c', 'c'], 3)
+     ['c', 'a', 'b']
+     >>> top_k_frequent_words(['a', 'b', 'c', 'a', 'c', 'c'], 2)
+@@ -85,13 +136,37 @@ def top_k_frequent_words(words: list[str], k_value: int) -> list[str]:
+     []
+     >>> top_k_frequent_words(['a', 'a'], 2)
+     ['a']
++    >>> top_k_frequent_words(['a', 'b', 'c', 'a', 'c', 'c'], 3, reverse=True)
++    ['b', 'a', 'c']
++    >>> top_k_frequent_words(['bb', 'a', 'ccc', 'bb', 'a', 'ccc'], 3, key=len)
++    ['a', 'bb', 'ccc']
++    >>> top_k_frequent_words(['bb', 'a', 'ccc', 'bb', 'a', 'ccc'], 3, key=len,
++    ...                      reverse=True)
++    ['ccc', 'bb', 'a']
++    >>> top_k_frequent_words(['a', 'a', 'a'], 1)
++    ['a']
++    >>> top_k_frequent_words(['a', 'a'], 5)
++    ['a']
++    >>> top_k_frequent_words(['a', 'b', 'c'], 3)
++    ['a', 'b', 'c']
++    >>> top_k_frequent_words(['a', 'b'], 2, key='oops')
++    Traceback (most recent call last):
++        ...
++    TypeError: key must be a callable or None
+     """
+-    heap: Heap[WordCount] = Heap()
++    key_func = _resolve_key(key)
++
+     count_by_word = Counter(words)
+-    heap.build_max_heap(
+-        [WordCount(word, count) for word, count in count_by_word.items()]
+-    )
+-    return [heap.extract_max().word for _ in range(min(k_value, len(count_by_word)))]
++    # Rank by descending frequency, breaking ties with ``key`` (ascending by
++    # default). Python's ``sorted`` is stable, so sorting by the tie-break key
++    # first and then by descending frequency yields the desired composite
++    # order: primary key is frequency (descending), secondary key is the
++    # customizable tie-break (ascending).
++    ranked = sorted(count_by_word, key=key_func)
++    ranked.sort(key=lambda word: count_by_word[word], reverse=True)
++    if reverse:
++        ranked.reverse()
++    return ranked[: min(k_value, len(count_by_word))]
+ 
+ 
+ if __name__ == "__main__":

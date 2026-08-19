@@ -90,7 +90,7 @@ def main() -> None:
         deleted = sum(1 for line in patch_text.splitlines() if line.startswith("-") and not line.startswith("---") )
         if len(source_files) < 7:
             fail(errors, f"source file count below official difficulty gate: {len(source_files)}")
-        if added + deleted < 500:
+        if added + deleted < 600:
             fail(errors, f"solution changed lines below difficulty gate: {added + deleted}")
 
     if is_v2_package:

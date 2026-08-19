@@ -11,6 +11,11 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+try:
+    from .production_guide import ensure_agent_guide
+except ImportError:  # pragma: no cover - direct script execution
+    from production_guide import ensure_agent_guide
+
 
 def run(cmd: list[str], *, cwd: Path | None = None, check: bool = True) -> subprocess.CompletedProcess[str]:
     return subprocess.run(cmd, cwd=cwd, check=check, capture_output=True, text=True)
@@ -152,6 +157,7 @@ def main() -> None:
             shutil.rmtree(temporary)
 
     result: dict[str, object] = {"slot": args.slot, "published": str(destination)}
+    result["agent_guide"] = ensure_agent_guide(root)
     if args.cleanup_docker:
         result["docker_cleanup"] = cleanup_docker(args.slot, str(row["base_commit_hash"]))
     if args.cleanup_workspaces:

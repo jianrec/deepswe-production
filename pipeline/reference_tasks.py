@@ -51,6 +51,23 @@ def run(cmd: list[str], cwd: Path | None = None, timeout: int = 900) -> str:
     return result.stdout
 
 
+def ensure_commit_identity(repo: Path) -> None:
+    """Set a local-only identity for the temporary reference commit."""
+    for key, value in (
+        ("user.name", "DeepSWE Production"),
+        ("user.email", "deepswe-production@localhost"),
+    ):
+        current = subprocess.run(
+            ["git", "config", "--local", "--get", key],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if not current.stdout.strip():
+            run(["git", "config", "--local", key, value], repo)
+
+
 def read(path: Path, limit: int = 12000) -> str:
     try:
         return path.read_text(encoding="utf-8", errors="replace")[:limit]
@@ -357,7 +374,11 @@ Return a complete replacement operation set, preserving valid work from the reje
 This is implementation group {group_number} of {group_count}. Other calls implement the remaining
 files. Return operations for EVERY file in TARGET FILES and for NO other file. Treat excerpts from
 already-completed groups as authoritative integration context. The final combined patch, not this group
-alone, must satisfy the complete issue. Keep this group focused and complete so it composes cleanly.
+alone, must satisfy the complete issue. Produce at least 175 meaningful changed source lines for this
+group so the full patch lands safely above the 600-line production minimum. Use real behavior needed by
+the issue: validation, compatibility handling, edge cases, integration behavior, and precise public
+documentation. Do not reach that target with comments, whitespace, or unrelated refactors. Keep this
+group focused and complete so it composes cleanly.
 """
     return f"""You are a deterministic patch generator. You do not have tools and cannot explore the repository. All relevant source excerpts are included below. Implement the following ORIGINAL feature in the pinned repository and output the requested part of the Oracle reference patch.
 
@@ -387,7 +408,7 @@ Repository excerpts:
 {context(repo, design)}
 {repair}
 
-Return ONLY JSON: {{"operations":[{{"path":"repository-relative/path","mode":"replace","old":"exact existing text","new":"replacement text"}}]}}. Use mode `create` with `content` for new files. Do not write a plan, progress update, apology, or explanation. Do not say that you need to inspect files. Preserve backward compatibility and implement every behavior assigned to the target files. Return at least one operation for every target file and never edit a path outside TARGET FILES. The final combined patch must contain 500-1800 changed lines across 7-16 source files; do not pad with comments or unrelated refactors. Do not omit handlers, adapters, persistence paths, or public exports named in the issue or PR chain. Each replace operation's old text must be copied exactly from the supplied excerpts. Do not modify CI or hidden verifier files.
+Return ONLY JSON: {{"operations":[{{"path":"repository-relative/path","mode":"replace","old":"exact existing text","new":"replacement text"}}]}}. Use mode `create` with `content` for new files. Do not write a plan, progress update, apology, or explanation. Do not say that you need to inspect files. Preserve backward compatibility and implement every behavior assigned to the target files. Return at least one operation for every target file and never edit a path outside TARGET FILES. The final combined patch must contain 600-1800 changed lines across 7-16 source files; target 750-1100 to provide margin. Do not pad with comments or unrelated refactors. Do not omit handlers, adapters, persistence paths, or public exports named in the issue or PR chain. Each replace operation's old text must be copied exactly from the supplied excerpts. Do not modify CI or hidden verifier files.
 Keep every `old` value to the smallest unique exact anchor needed for the edit (normally no more than 40 lines), and never repeat an entire existing source file."""
 
 
@@ -637,6 +658,7 @@ def process(
                 shutil.rmtree(worktree)
         worktree.parent.mkdir(parents=True, exist_ok=True)
         run(["git", "worktree", "prune"], repo)
+        ensure_commit_identity(repo)
         run(["git", "worktree", "add", "--detach", str(worktree), row["base_commit_hash"]], repo)
         prior_patch_path = package / "solution" / "solution.patch"
         prior_patch = read(prior_patch_path, 60000) if prior_patch_path.is_file() else ""
@@ -647,7 +669,10 @@ def process(
         if reuse_existing_patch:
             if not prior_patch_path.is_file():
                 raise FileNotFoundError("cannot reuse a missing solution.patch")
-            run(["git", "apply", "--index", "--whitespace=nowarn", str(prior_patch_path)], worktree)
+            # Reused patches are verified against the checkout content here and
+            # staged uniformly below.  Avoid --index: a portable reconstructed
+            # cache can have an equivalent tree with different index blob IDs.
+            run(["git", "apply", "--whitespace=nowarn", str(prior_patch_path)], worktree)
             existing_usage = (row.get("usage") or {}).get("reference_implementation") or {}
             event.update({
                 "status": "success",
@@ -789,8 +814,8 @@ def process(
             added, deleted, path = line.split("\t", 2)
             if path in source_set and added.isdigit() and deleted.isdigit():
                 changed_lines += int(added) + int(deleted)
-        if changed_lines < 500:
-            raise ValueError(f"reference patch changes fewer than 500 lines: {changed_lines}")
+        if changed_lines < 600:
+            raise ValueError(f"reference patch changes fewer than 600 lines: {changed_lines}")
         if changed_lines > 1800:
             raise ValueError(f"reference patch exceeds 1800 changed lines: {changed_lines}")
         run(["git", "commit", "-m", "reference implementation"], worktree)

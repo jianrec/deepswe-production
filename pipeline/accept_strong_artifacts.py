@@ -9,7 +9,6 @@ package and advance the manifest to hidden-test generation.
 from __future__ import annotations
 
 import argparse
-import fcntl
 import json
 import os
 import re
@@ -18,6 +17,8 @@ import subprocess
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
+
+from filelock import exclusive_lock
 
 from author_tasks import slugify, validate_design, validate_design_against_repo
 
@@ -172,8 +173,8 @@ def validate_patch_coverage(design: dict, stats: dict) -> None:
     if not 7 <= len(source_files) <= 16:
         raise ValueError(f"reference patch source file count outside 7..16: {len(source_files)}")
     changed_lines = int(stats["source_changed_lines"])
-    if not 500 <= changed_lines <= 1800:
-        raise ValueError(f"reference patch source changed lines outside 500..1800: {changed_lines}")
+    if not 600 <= changed_lines <= 1800:
+        raise ValueError(f"reference patch source changed lines outside 600..1800: {changed_lines}")
     declared = {str(item) for item in design.get("affected_source_files", []) if str(item)}
     covered = declared & source_files
     required = max(7, (3 * len(declared) + 3) // 4)
@@ -337,9 +338,7 @@ def main() -> None:
 
     manifest_path = root / "registry/task_manifest.jsonl"
     lock_path = root / "registry/.manifest.lock"
-    lock_path.touch(exist_ok=True)
-    with lock_path.open("r+") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+    with exclusive_lock(lock_path):
         rows = load_jsonl(manifest_path)
         row = next((item for item in rows if item.get("slot") == args.slot), None)
         if row is None:
@@ -404,7 +403,6 @@ def main() -> None:
         }
         with (root / "registry/production-events.jsonl").open("a", encoding="utf-8") as events:
             events.write(json.dumps(event, ensure_ascii=False) + "\n")
-        fcntl.flock(lock, fcntl.LOCK_UN)
 
     print(json.dumps({"slot": args.slot, "status": "accepted", "stage": NEXT_STAGE, "task_id": task_id, "reference_stats": stats}, ensure_ascii=False))
 

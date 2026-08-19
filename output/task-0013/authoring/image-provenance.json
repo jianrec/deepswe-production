@@ -1,0 +1,27 @@
+{
+  "build_mode": "local_pinned_checkout",
+  "build_elapsed_seconds": 24.528,
+  "verifier": {
+    "id": "sha256:97f0db672d477df3560137c82a02b53eb32d3baf27b898a79eafe6923e8e5653",
+    "repo_tags": [
+      "deepswe-task-0013-tests:f5988cc09713"
+    ],
+    "labels": {
+      "deepswe.base_sha": "f5988cc09713315817df6a7e327e258013a94440",
+      "deepswe.repository": "TheAlgorithms/Python",
+      "deepswe.source_mode": "local-pinned-checkout"
+    }
+  },
+  "environment": {
+    "id": "sha256:a1c4ec712b842c3abbdc0507503cd709cdd9f0b377d9613d1da28945619b7b84",
+    "repo_tags": [
+      "deepswe-task-0013-environment:f5988cc09713"
+    ],
+    "labels": {
+      "deepswe.base_sha": "f5988cc09713315817df6a7e327e258013a94440",
+      "deepswe.repository": "TheAlgorithms/Python",
+      "deepswe.source_mode": "local-pinned-checkout"
+    }
+  },
+  "hidden_test_isolation": true
+}
