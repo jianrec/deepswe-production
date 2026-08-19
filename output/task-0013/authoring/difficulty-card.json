@@ -1,0 +1,12 @@
+{
+  "difficulty_score": 2.7,
+  "exploration_points": 3,
+  "cross_module_points": 3,
+  "integration_points": 2,
+  "regression_risk_points": 3,
+  "estimated_changed_lines": 640,
+  "estimated_changed_files": 8,
+  "module_count": 3,
+  "source_file_count": 8,
+  "changed_lines": 815
+}

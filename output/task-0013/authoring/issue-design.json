@@ -1,0 +1,208 @@
+{
+  "title": "Add consistent key-function and reverse support across sorts, searches, and string ranking",
+  "task_id_slug": "add-consistent-key-function-and-reverse-supp-0013",
+  "issue": "The sorting, searching, and string-ranking algorithms in this repository each hard-code their comparison logic. `sorts/bubble_sort.py`, `sorts/insertion_sort.py`, `sorts/merge_sort.py`, and `sorts/selection_sort.py` only sort raw elements in ascending order; `searches/binary_search.py`, `searches/linear_search.py`, and `searches/jump_search.py` compare items directly; and `strings/top_k_frequent_words.py` bakes in its own frequency-then-lexicographic ordering. This makes the collection impossible to use for records, tuples-with-keys, or descending orders without wrapping data by hand.\n\nIntroduce a single, repository-wide ordering convention: every listed function gains keyword-only `key` and (where meaningful) `reverse` parameters that mirror the semantics of the Python built-ins `sorted`, `min`, and `bisect`.\n\nRequired behavior:\n- `key`: an optional callable mapping each element to the value used for comparison. When `None` (the default) the element itself is compared, exactly as today.\n- `reverse`: for sorting functions, produce a descending ordering; for `binary_search` and `jump_search` it declares that the input is sorted in descending order by `key` and inverts the comparison direction. `linear_search` scans unordered data and therefore takes only `key`.\n- Sorting must be stable: elements comparing equal under `key` keep their original relative order, and this must also hold when `reverse=True`, matching `sorted(..., reverse=True)`.\n- Searches return the index of the first element whose `key` equals the target's `key`, or `-1` when absent; a mismatch between `reverse` and the actual ordering yields `-1` rather than raising.\n- `top_k_frequent_words` keeps ranking by descending frequency, but `key` customizes the tie-break among equal-frequency words (default: lexicographic ascending) and `reverse` flips the final list.\n\nCompatibility requirements: calling any function with no new arguments must return byte-for-byte identical results and types to the current implementation, and all existing doctests must continue to pass unchanged. New parameters are keyword-only so positional call sites are unaffected. Passing a non-callable `key` must raise `TypeError`; searching with a `key` that produces non-monotonic values is undefined but must not crash. The convention should be documented consistently in each function's docstring.",
+  "acceptance_criteria": [
+    "Each listed function accepts keyword-only `key` and (except `linear_search`) `reverse` parameters with the defaults `key=None`, `reverse=False`.",
+    "Default invocations (no new kwargs) return identical values and types to the pre-change implementations, and every pre-existing doctest passes without modification.",
+    "`key=None` compares elements directly; a provided callable is applied to derive comparison values without mutating input elements.",
+    "Sorting functions are stable under both ascending and descending (`reverse=True`) ordering, matching `sorted` semantics.",
+    "`binary_search`/`jump_search` with `reverse=True` correctly locate items in descending-by-key input and return the item index, or `-1` when absent or when ordering does not match.",
+    "`linear_search` supports `key` and returns the first matching index or `-1`.",
+    "`top_k_frequent_words` ranks by descending frequency with a customizable `key` tie-break and honors `reverse`, defaulting to lexicographic ascending tie-breaks.",
+    "A non-callable `key` argument raises `TypeError` in every function.",
+    "Empty collections, single-element collections, and all-equal-key collections are handled without error across every function.",
+    "`python -m pytest searches sorts strings -q` passes with no regressions."
+  ],
+  "public_api_contract": [
+    "sorts/bubble_sort.py: def bubble_sort(collection: list, *, key: Callable[[Any], Any] | None = None, reverse: bool = False) -> list",
+    "sorts/insertion_sort.py: def insertion_sort(collection: list, *, key: Callable[[Any], Any] | None = None, reverse: bool = False) -> list",
+    "sorts/merge_sort.py: def merge_sort(collection: list, *, key: Callable[[Any], Any] | None = None, reverse: bool = False) -> list",
+    "sorts/selection_sort.py: def selection_sort(collection: list, *, key: Callable[[Any], Any] | None = None, reverse: bool = False) -> list",
+    "searches/binary_search.py: def binary_search(sorted_collection: list, item: Any, *, key: Callable[[Any], Any] | None = None, reverse: bool = False) -> int  # returns index or -1",
+    "searches/linear_search.py: def linear_search(sequence: list, target: Any, *, key: Callable[[Any], Any] | None = None) -> int  # returns index or -1",
+    "searches/jump_search.py: def jump_search(arr: list, item: Any, *, key: Callable[[Any], Any] | None = None, reverse: bool = False) -> int  # returns index or -1",
+    "strings/top_k_frequent_words.py: def top_k_frequent_words(words: list[str], k_value: int, *, key: Callable[[str], Any] | None = None, reverse: bool = False) -> list[str]",
+    "Convention: key=None means compare elements directly; key callable maps element->comparison value; reverse=True means descending order (sorts) or descending-sorted input (binary/jump search); a non-callable key raises TypeError."
+  ],
+  "pr_chain": [
+    {
+      "stage": 1,
+      "depends_on": [],
+      "modules": [
+        "sorts"
+      ],
+      "files": [
+        "sorts/bubble_sort.py",
+        "sorts/insertion_sort.py",
+        "sorts/merge_sort.py",
+        "sorts/selection_sort.py"
+      ],
+      "behavior": "Establish the shared key/reverse convention and implement it in the four sorting algorithms with guaranteed stability under both directions; preserve all existing signatures, defaults, and doctests."
+    },
+    {
+      "stage": 2,
+      "depends_on": [
+        1
+      ],
+      "modules": [
+        "searches"
+      ],
+      "files": [
+        "searches/binary_search.py",
+        "searches/linear_search.py",
+        "searches/jump_search.py"
+      ],
+      "behavior": "Add key support to all three searches and reverse (descending-input) support to binary_search and jump_search, returning matching indices or -1; keep default behavior identical."
+    },
+    {
+      "stage": 3,
+      "depends_on": [
+        1
+      ],
+      "modules": [
+        "strings"
+      ],
+      "files": [
+        "strings/top_k_frequent_words.py"
+      ],
+      "behavior": "Route the ranking through the shared ordering convention: descending frequency with a customizable key tie-break and reverse flag, defaulting to lexicographic-ascending ties."
+    },
+    {
+      "stage": 4,
+      "depends_on": [
+        1,
+        2,
+        3
+      ],
+      "modules": [
+        "sorts",
+        "searches",
+        "strings"
+      ],
+      "files": [
+        "sorts/bubble_sort.py",
+        "searches/binary_search.py",
+        "strings/top_k_frequent_words.py"
+      ],
+      "behavior": "Harden edge cases and error handling across modules: non-callable key raises TypeError, empty/single/all-equal inputs are safe, and docstrings document the convention uniformly."
+    }
+  ],
+  "affected_source_files": [
+    "sorts/bubble_sort.py",
+    "sorts/insertion_sort.py",
+    "sorts/merge_sort.py",
+    "sorts/selection_sort.py",
+    "searches/binary_search.py",
+    "searches/linear_search.py",
+    "searches/jump_search.py",
+    "strings/top_k_frequent_words.py"
+  ],
+  "module_count": 3,
+  "feature_test_plan": [
+    "bubble_sort with key=abs orders by absolute value while preserving stored signs.",
+    "insertion_sort with key=len sorts strings by length with stable ties.",
+    "merge_sort with reverse=True returns descending order equal to sorted(x, reverse=True).",
+    "selection_sort with key extracting tuple field orders records correctly.",
+    "Each sort with key=None matches the current ascending output exactly.",
+    "Stability check: sorting tuples by first element keeps second-element order in ascending and descending modes.",
+    "binary_search with key locates an item in a list sorted by that key.",
+    "binary_search with reverse=True finds items in a descending-sorted list.",
+    "binary_search returns -1 for an absent key and for reverse mismatched against ascending data.",
+    "jump_search with key returns the correct index for present items and -1 for absent.",
+    "jump_search with reverse=True matches descending input.",
+    "linear_search with key finds the first record whose key equals target.",
+    "linear_search returns -1 when no element matches under key.",
+    "top_k_frequent_words default output unchanged for existing examples.",
+    "top_k_frequent_words with custom key changes tie-break ordering among equal-frequency words.",
+    "top_k_frequent_words with reverse=True flips the ranked list.",
+    "Non-callable key raises TypeError in every function.",
+    "Empty collection returns [] for sorts and -1 for searches without error.",
+    "Single-element and all-equal-key collections handled for all functions.",
+    "k_value larger than the number of distinct words returns all words in ranked order."
+  ],
+  "regression_test_plan": [
+    "Property: for random lists, bubble/insertion/merge/selection sort with key equals sorted(x, key=key) and with reverse equals sorted(x, key=key, reverse=True).",
+    "Property: default (no kwargs) output of each sort equals the pre-change implementation captured as an oracle.",
+    "Property: sorting is a permutation of the input (same multiset) for all key/reverse combinations.",
+    "Property: sort output is monotonic non-decreasing under key (non-increasing when reverse).",
+    "Property: stability holds by attaching original indices and confirming equal-key elements retain input order in both directions.",
+    "Property: binary_search(sorted(x, key=k), item, key=k) returns an index i with key(result)==key(item) whenever item present, else -1, for random inputs.",
+    "Property: binary_search and jump_search agree with a linear scan on membership and on the matched key across random data and both reverse modes.",
+    "Property: linear_search matches Python's next-index-of semantics under key for random sequences.",
+    "Property: idempotence — sorting an already-sorted-by-key list leaves order unchanged.",
+    "Property: top_k_frequent_words result length is min(k_value, distinct_word_count) and words are ordered by non-increasing frequency for random word lists.",
+    "Regression: existing doctests in all eight files continue to pass unchanged.",
+    "Fuzz: mixed-type-safe keys (e.g., key=str) never raise for uniform inputs; non-callable key always raises TypeError."
+  ],
+  "difficulty_card": {
+    "difficulty_score": 2.7,
+    "exploration_points": 3,
+    "cross_module_points": 3,
+    "integration_points": 2,
+    "regression_risk_points": 3,
+    "estimated_changed_lines": 640,
+    "estimated_changed_files": 8
+  },
+  "reference_implementation_plan": [
+    {
+      "file": "sorts/bubble_sort.py",
+      "edits": "Add `from collections.abc import Callable` and `from typing import Any`; add keyword-only `key` and `reverse` params; compute comparison values via key (default identity); compare using derived values, inverting for reverse while preserving stability; validate key is callable; extend docstring with key/reverse examples."
+    },
+    {
+      "file": "sorts/insertion_sort.py",
+      "edits": "Add key/reverse params; shift elements based on key-derived comparison; keep insertion stable in both directions; guard non-callable key with TypeError; document new behavior."
+    },
+    {
+      "file": "sorts/merge_sort.py",
+      "edits": "Thread key/reverse through the recursive split and merge; in merge, take the left element on ties to preserve stability, invert the take condition for reverse; validate key; add doctests for key and reverse."
+    },
+    {
+      "file": "sorts/selection_sort.py",
+      "edits": "Add key/reverse params; select min/max under key each pass; keep selection stable; validate key; document examples."
+    },
+    {
+      "file": "searches/binary_search.py",
+      "edits": "Add key/reverse params to the primary binary_search; derive comparison value from key for both target and midpoint; invert the low/high update when reverse=True; return matching index or -1; keep default path identical; extend docstring."
+    },
+    {
+      "file": "searches/linear_search.py",
+      "edits": "Add key param; compare key(element) to key(target); return first matching index or -1; validate callable; document."
+    },
+    {
+      "file": "searches/jump_search.py",
+      "edits": "Add key/reverse params; apply key to block boundaries and linear scan; invert comparisons for descending input; return index or -1; preserve default behavior; add doctests."
+    },
+    {
+      "file": "strings/top_k_frequent_words.py",
+      "edits": "Route ranking through the shared convention: sort candidates by (-frequency, key(word)) with key defaulting to identity for lexicographic ties, then reverse if requested; validate key; keep default output identical to current examples; document key/reverse."
+    }
+  ],
+  "build_and_test_commands": [
+    "python -m pytest searches sorts strings -q",
+    "python -m pytest --doctest-modules sorts/bubble_sort.py sorts/insertion_sort.py sorts/merge_sort.py sorts/selection_sort.py searches/binary_search.py searches/linear_search.py searches/jump_search.py strings/top_k_frequent_words.py -q"
+  ],
+  "repository": {
+    "url": "https://github.com/TheAlgorithms/Python",
+    "full_name": "TheAlgorithms/Python",
+    "language": "python",
+    "base_commit": "f5988cc09713315817df6a7e327e258013a94440",
+    "stars": 223664,
+    "license": "MIT",
+    "runtime_preflight": {
+      "base_commit_hash": "f5988cc09713315817df6a7e327e258013a94440",
+      "command": "python -m pytest searches sorts strings -q",
+      "environment": "Linux container, runtime network disabled",
+      "excluded_test_ids": [],
+      "image": "deepswe-preflight-thealgorithms-python:f5988cc09713",
+      "image_id": "sha256:762644e3ef07dafa65ddd00009399fcddfe548f1a4ae3edd08915467e8abfe5c",
+      "network_mode": "no-network",
+      "passed_at": "2026-08-12T07:38:21.321492+00:00",
+      "status": "passed",
+      "test_count": 194
+    }
+  },
+  "slot": "task-0013",
+  "author_model": "claude-opus-4-8",
+  "pipeline_version": "2.0"
+}

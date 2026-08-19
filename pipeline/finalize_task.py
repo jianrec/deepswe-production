@@ -59,7 +59,17 @@ def run(
     check: bool = True,
     timeout: int = 1800,
 ) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(cmd, cwd=cwd, check=check, capture_output=True, text=True, timeout=timeout)
+    # Docker/buildkit emits UTF-8 even when Windows uses a legacy console code page.
+    return subprocess.run(
+        cmd,
+        cwd=cwd,
+        check=check,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=timeout,
+    )
 
 
 def toml_string(value: object) -> str:
