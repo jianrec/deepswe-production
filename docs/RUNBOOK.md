@@ -97,7 +97,7 @@ harbor run \
 - 单 slot 必须依次经过 author → reference → hidden tests → QA → publish。
 - 初始最多两个 Docker QA 并发。
 - 不要并行运行仍使用整表写回 manifest 的旧阶段；完成单 slot merge 改造前，author/reference 阶段需要由一个调度器统一提交状态。
-- GitHub 仓库 clone 使用 shallow、HTTP/1.1 和最多三次重试；部分 clone 会被清理。固定
+- GitHub 仓库 clone 使用 shallow、HTTP/1.1、每次 180 秒超时和最多三次重试；部分 clone 会被清理。固定
   preflight commit 失败的仓库会写入该 slot 的 `excluded_repositories`，下次重试自动换候选仓库。
 
 Windows 可双击仓库根目录的 `start-production.cmd`。启动器会请求管理员权限、启用 WSL 2 组件、启动 Docker，并在 Engine 就绪后恢复 `task-0013` QA 和生产入口。若 CPU 虚拟化在 BIOS 中关闭，先开启 Intel VT-x 后再运行；启用 Windows 功能后按提示重启，再次双击启动器。

@@ -24,6 +24,7 @@ DEFAULT_API = "https://www.packyapi.com/v1/messages"
 MAX_REPOSITORY_SIZE_KB = 60000
 MAX_TRACKED_FILES = 12000
 MAX_WORKSPACE_MANIFESTS = 40
+GIT_NETWORK_TIMEOUT = 180
 
 
 def now() -> str:
@@ -105,7 +106,7 @@ def checkout_repo(root: Path, candidate: dict) -> tuple[Path, str]:
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                timeout=900,
+                timeout=GIT_NETWORK_TIMEOUT,
             )
             if clone.returncode == 0 and (repo / ".git").exists():
                 break
@@ -141,7 +142,7 @@ def checkout_repo(root: Path, candidate: dict) -> tuple[Path, str]:
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                timeout=900,
+                timeout=GIT_NETWORK_TIMEOUT,
                 check=False,
             )
             if fetched.returncode:

@@ -78,6 +78,8 @@ in Git, task artifacts, logs, prompts, or this guide.
   the manifest state, clean partial clones, retry transient failures, and
   move to another repository candidate instead of retrying one broken source
   forever.
+- Bound each GitHub clone/fetch attempt to three minutes; a timed-out or
+  incomplete checkout is excluded for that slot so production keeps moving.
 - Keep each task's Docker, worktree, and log cleanup scoped to that task.
   Never run an unbounded global Docker prune during production.
 - Use atomic manifest writes and merge published task directories between
